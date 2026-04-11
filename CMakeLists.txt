@@ -27,6 +27,7 @@ add_library(player-status-modifier SHARED
     src/ptrchain.cpp
     src/ptrchain_resources.cpp
     src/position_control.cpp
+    src/damage_toggle.cpp
         src/runtime/actor_resolve.cpp
         src/runtime/damage_logic.cpp
         src/runtime/durability_logic.cpp

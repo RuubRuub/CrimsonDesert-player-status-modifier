@@ -1,5 +1,6 @@
 #include "config.h"
 #include "config_watcher.h"
+#include "damage_toggle.h"
 #include "hooks.h"
 #include "logger.h"
 #include "mod_logic.h"
@@ -66,6 +67,12 @@ DWORD WINAPI InitializeMod(LPVOID) {
         return 0;
     }
 
+    if (!InitializeDamageToggle()) {
+        Log("dllmain: outgoing damage toggle initialization failed");
+        RemoveHooks();
+        return 0;
+    }
+
     if (!StartConfigWatcher()) {
         Log("dllmain: config watcher failed to start");
     }
@@ -89,6 +96,7 @@ BOOL APIENTRY DllMain(HMODULE module, const DWORD reason, LPVOID) {
         StopMountResolver();
         StopConfigWatcher();
         ShutdownPositionControl();
+        ShutdownDamageToggle();
         RemoveHooks();
         ShutdownLogger();
     }

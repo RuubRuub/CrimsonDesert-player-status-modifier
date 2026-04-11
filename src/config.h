@@ -19,6 +19,13 @@ struct DamageChannelConfig {
     bool operator==(const DamageChannelConfig&) const = default;
 };
 
+struct DamageToggleConfig {
+    bool enabled = false;
+    int key = VK_F8;
+
+    bool operator==(const DamageToggleConfig&) const = default;
+};
+
 struct DamageConfig {
     DamageChannelConfig outgoing{true, 2.0};
     DamageChannelConfig incoming{false, 1.0};
@@ -27,12 +34,14 @@ struct DamageConfig {
 };
 
 struct ItemConfig {
+    bool enabled = true;
     double gain_multiplier = 2.0;
 
     bool operator==(const ItemConfig&) const = default;
 };
 
 struct DurabilityConfig {
+    bool enabled = true;
     double consumption_chance = 100.0;
 
     bool operator==(const DurabilityConfig&) const = default;
@@ -69,6 +78,7 @@ struct DragonLimitConfig {
 struct GeneralConfig {
     bool enabled = true;
     bool log_enabled = true;
+    bool enable_stat_changes = true;
     DWORD init_delay_ms = 3000;
     DWORD stale_component_ms = 60000;
     DWORD relock_idle_ms = 10000;
@@ -84,6 +94,7 @@ struct ModConfig {
     MountConfig mount;
     DragonLimitConfig dragon_limit;
     PositionControlConfig position_control;
+    DamageToggleConfig damage_toggle;
     StatConfig health{0.5, 2.0};
     StatConfig stamina{0.5, 1.0};
     StatConfig spirit{0.5, 2.0};

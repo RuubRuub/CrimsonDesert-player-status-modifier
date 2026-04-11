@@ -96,6 +96,10 @@ void SanitizeConfig(ModConfig* const next) {
         next->position_control.horizontal_key = VK_F7;
     }
 
+    if (next->damage_toggle.key <= 0) {
+        next->damage_toggle.key = VK_F8;
+    }
+
     if (!std::isfinite(next->position_control.horizontal_multiplier) || next->position_control.horizontal_multiplier < 0.0f) {
         next->position_control.horizontal_multiplier = 1.5f;
     }
@@ -119,6 +123,7 @@ bool ReadConfigSnapshot(const std::wstring& config_path, ModConfig* const config
 
     next.general.enabled = ReadBool(L"General", L"Enabled", next.general.enabled, config_path);
     next.general.log_enabled = ReadBool(L"General", L"LogEnabled", next.general.log_enabled, config_path);
+    next.general.enable_stat_changes = ReadBool(L"General", L"EnableStatChanges", next.general.enable_stat_changes, config_path);
     next.general.init_delay_ms = ReadDword(L"General", L"InitDelayMs", next.general.init_delay_ms, config_path);
     next.general.stale_component_ms = ReadDword(L"General", L"StaleComponentMs", next.general.stale_component_ms, config_path);
     next.general.relock_idle_ms = ReadDword(L"General", L"RelockIdleMs", next.general.relock_idle_ms, config_path);
@@ -130,11 +135,17 @@ bool ReadConfigSnapshot(const std::wstring& config_path, ModConfig* const config
         ReadBool(L"OutgoingDamage", L"Enabled", has_legacy_damage_multiplier, config_path);
     next.damage.outgoing.multiplier =
         ReadDouble(L"OutgoingDamage", L"Multiplier", legacy_damage_multiplier, config_path);
+    next.damage_toggle.enabled =
+        ReadBool(L"OutgoingDamage", L"ToggleEnable", next.damage_toggle.enabled, config_path);
+    next.damage_toggle.key = static_cast<int>(
+        ReadDword(L"OutgoingDamage", L"ToggleKey", static_cast<DWORD>(next.damage_toggle.key), config_path));
     next.damage.incoming.enabled =
         ReadBool(L"IncomingDamage", L"Enabled", next.damage.incoming.enabled, config_path);
     next.damage.incoming.multiplier =
         ReadDouble(L"IncomingDamage", L"Multiplier", next.damage.incoming.multiplier, config_path);
+    next.items.enabled = ReadBool(L"Items", L"Enable", next.items.enabled, config_path);
     next.items.gain_multiplier = ReadDouble(L"Items", L"GainMultiplier", next.items.gain_multiplier, config_path);
+    next.durability.enabled = ReadBool(L"Durability", L"Enable", next.durability.enabled, config_path);
     next.durability.consumption_chance =
         ReadDoubleRaw(L"Durability", L"ConsumptionChance", next.durability.consumption_chance, config_path);
     next.mount.enabled = ReadBool(L"Mount", L"Enabled", next.mount.enabled, config_path);

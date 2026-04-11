@@ -212,7 +212,7 @@ bool TryAdjustStatWrite(const uintptr_t entry,
     }
 
     const auto& config = GetConfig();
-    if (!config.general.enabled || entry < kMinimumPointerAddress) {
+    if (!config.general.enabled || !config.general.enable_stat_changes || entry < kMinimumPointerAddress) {
         return false;
     }
 

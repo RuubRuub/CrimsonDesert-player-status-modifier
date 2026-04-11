@@ -37,7 +37,7 @@ bool TryScaleItemGain(const int64_t amount, int64_t* const value) {
     }
 
     const auto& config = GetConfig();
-    if (!config.general.enabled || config.items.gain_multiplier == 1.0 || amount <= 0) {
+    if (!config.general.enabled || !config.items.enabled || config.items.gain_multiplier == 1.0 || amount <= 0) {
         return false;
     }
 

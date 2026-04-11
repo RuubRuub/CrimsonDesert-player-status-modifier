@@ -1,6 +1,7 @@
 #include "config_watcher.h"
 
 #include "config.h"
+#include "damage_toggle.h"
 #include "hooks.h"
 #include "logger.h"
 #include "position_control.h"
@@ -99,6 +100,13 @@ void ConfigWatcherLoop() {
         if (!ApplyPositionControlConfig(previous.position_control, next.position_control)) {
             if (previous.general.log_enabled) {
                 Log("config-watcher: failed to apply position control changes");
+            }
+            continue;
+        }
+
+        if (!ApplyDamageToggleConfig(previous.damage_toggle, next.damage_toggle)) {
+            if (previous.general.log_enabled) {
+                Log("config-watcher: failed to apply outgoing damage toggle changes");
             }
             continue;
         }

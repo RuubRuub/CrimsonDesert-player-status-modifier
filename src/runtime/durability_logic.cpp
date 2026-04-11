@@ -54,7 +54,7 @@ bool TryAdjustDurabilityWrite(const uintptr_t entry, uint16_t* const value) {
     }
 
     const auto& config = GetConfig();
-    if (!config.general.enabled || entry < kMinimumPointerAddress) {
+    if (!config.general.enabled || !config.durability.enabled || entry < kMinimumPointerAddress) {
         return false;
     }
 
@@ -93,7 +93,7 @@ bool TryAdjustDurabilityDelta(const uintptr_t entry, const uint16_t current_valu
     }
 
     const auto& config = GetConfig();
-    if (!config.general.enabled || entry < kMinimumPointerAddress) {
+    if (!config.general.enabled || !config.durability.enabled || entry < kMinimumPointerAddress) {
         return false;
     }
 

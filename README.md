@@ -74,6 +74,7 @@ Default config:
 [General]
 Enabled=1
 LogEnabled=1
+EnableStatChanges=1
 InitDelayMs=3000
 StaleComponentMs=60000
 RelockIdleMs=10000
@@ -81,15 +82,19 @@ RelockIdleMs=10000
 [OutgoingDamage]
 Enabled=1
 Multiplier=2.0
+ToggleEnable=0
+ToggleKey=119
 
 [IncomingDamage]
 Enabled=0
 Multiplier=1.0
 
 [Items]
+Enable=1
 GainMultiplier=2.0
 
 [Durability]
+Enable=1
 ConsumptionChance=100.0
 
 [Mount]
@@ -132,11 +137,18 @@ Durability fields:
 - `100` means maintenance and durability always consume normally
 - `0` means maintenance and durability never consume
 - values between `0` and `100` apply a per-write chance gate to both maintenance and durability loss paths
+- `Durability.Enable=1` enables durability consumption scaling; set to `0` to disable durability behavior from this mod
 
 Damage fields:
 
 - `OutgoingDamage.Enable=1` enables outgoing player / mount / dragon damage scaling
 - `OutgoingDamage.Multiplier` scales outgoing negative health deltas
+- `OutgoingDamage.ToggleEnable=1` enables the configured in-game toggle key for outgoing damage
+- `OutgoingDamage.ToggleKey` is a Windows virtual-key code to toggle outgoing damage live; default `119` (`VK_F8`)
+- `EnableStatChanges=1` enables health/stamina/spirit stat adjustment logic; set to `0` to disable all stat writes from this mod
+- `Items.Enable=1` enables item gain scaling; set to `0` to disable item gain changes
+- `Items.GainMultiplier` scales item gain amounts when item gain is enabled
+- `Durability.Enable=1` enables durability consumption scaling; set to `0` to disable durability changes
 - `IncomingDamage.Enable=1` enables incoming damage scaling against the resolved player target
 - `IncomingDamage.Multiplier` scales incoming negative health deltas; `1.0` means unchanged
 
