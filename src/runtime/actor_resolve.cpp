@@ -19,13 +19,17 @@ bool IsValidStatEntry(const uintptr_t entry, const int32_t expected_type) {
         return false;
     }
 
-    if (*reinterpret_cast<const int32_t*>(entry) != expected_type) {
+    __try {
+        if (*reinterpret_cast<const int32_t*>(entry) != expected_type) {
+            return false;
+        }
+
+        const int64_t current_value = *reinterpret_cast<const int64_t*>(entry + 0x08);
+        const int64_t max_value = *reinterpret_cast<const int64_t*>(entry + 0x18);
+        return max_value > 0 && current_value >= 0 && current_value <= max_value;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
         return false;
     }
-
-    const int64_t current_value = *reinterpret_cast<const int64_t*>(entry + 0x08);
-    const int64_t max_value = *reinterpret_cast<const int64_t*>(entry + 0x18);
-    return max_value > 0 && current_value >= 0 && current_value <= max_value;
 }
 
 bool TryGetStatEntryMaxValue(const uintptr_t entry, const int32_t expected_type, int64_t* const max_value) {

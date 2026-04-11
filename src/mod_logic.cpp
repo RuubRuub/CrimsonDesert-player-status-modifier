@@ -109,20 +109,22 @@ void UpdateTrackedPlayerStatusComponent(const uintptr_t actor, const uintptr_t c
         return;
     }
 
-    std::lock_guard lock(g_state_mutex);
-    if (g_player_resolve.marker == component) {
-        return;
-    }
-
     ActorResolveSnapshot resolved{};
-    if (!TryResolveActorResolveFromMarker(component, &resolved, actor)) {
-        return;
-    }
+    {
+        std::lock_guard lock(g_state_mutex);
+        if (g_player_resolve.marker == component) {
+            return;
+        }
 
-    ResetTrackedEntriesLocked();
-    ResetTrackedMountLocked();
-    g_player_resolve = resolved;
-    ResetTrackedDamageParticipantsLocked();
+        if (!TryResolveActorResolveFromMarker(component, &resolved, actor)) {
+            return;
+        }
+
+        ResetTrackedEntriesLocked();
+        ResetTrackedMountLocked();
+        g_player_resolve = resolved;
+        ResetTrackedDamageParticipantsLocked();
+    }
 
     Log("runtime: tracked player actor=0x%p status_marker=0x%p stat_root=0x%p",
         reinterpret_cast<void*>(resolved.actor),

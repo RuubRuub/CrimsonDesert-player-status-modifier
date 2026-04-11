@@ -41,3 +41,6 @@
 
 # Vendored dependency nested git metadata
 /deps/safetyhook/.git/
+
+# Build script
+/build.bat
