@@ -454,6 +454,62 @@ uintptr_t ScanForItemGainAccess() {
     return outcome.address;
 }
 
+uintptr_t ScanForAffinityGainPrepare() {
+    static constexpr PatternDefinition kPatterns[] = {
+        {
+            "primary",
+            "0F B6 47 38 88 45 ? 0F B6 47 39 88 45 ? 8B 47 08 89 45 ? 48 8B 47 10 48 89 45 ? 0F 10 47 18",
+            20,
+        },
+        {
+            "fallback",
+            "8B 47 08 89 45 ? 48 8B 47 10 48 89 45 ? 0F 10 47 18 0F 11 45 ?",
+            6,
+        },
+    };
+
+    const auto outcome = ScanInSections(kPatterns, sizeof(kPatterns) / sizeof(kPatterns[0]));
+    if (outcome.status == ScanStatus::Ambiguous) {
+        Log("scanner: affinity-gain-prepare found multiple matches, install failed");
+        return 0;
+    }
+
+    if (outcome.status != ScanStatus::Unique) {
+        Log("scanner: affinity-gain-prepare found 0 matches");
+        return 0;
+    }
+
+    return outcome.address;
+}
+
+uintptr_t ScanForAffinityCurrentWrite() {
+    static constexpr PatternDefinition kPatterns[] = {
+        {
+            "primary",
+            "48 89 43 48 41 8B CD 83 E9 01 74 0A 83 F9 01 75 09 88 4B 3F",
+            0,
+        },
+        {
+            "fallback",
+            "C7 43 40 00 00 00 00 48 89 43 48 41 8B CD 83 E9 01 74 0A",
+            7,
+        },
+    };
+
+    const auto outcome = ScanInSections(kPatterns, sizeof(kPatterns) / sizeof(kPatterns[0]));
+    if (outcome.status == ScanStatus::Ambiguous) {
+        Log("scanner: affinity-current-write found multiple matches, install failed");
+        return 0;
+    }
+
+    if (outcome.status != ScanStatus::Unique) {
+        Log("scanner: affinity-current-write found 0 matches");
+        return 0;
+    }
+
+    return outcome.address;
+}
+
 uintptr_t ScanForDurabilityWriteAccess() {
     static constexpr PatternDefinition kPatterns[] = {
         {
@@ -532,6 +588,57 @@ uintptr_t ScanForAbyssDurabilityDeltaAccess() {
 
     if (outcome.status != ScanStatus::Unique) {
         Log("scanner: abyss-durability-delta found 0 matches");
+        return 0;
+    }
+
+    return outcome.address;
+}
+
+uintptr_t ScanForStaminaAb00Access() {
+    static constexpr PatternDefinition kPatterns[] = {
+        {
+            "primary",
+            "0F B7 D7 49 8B CE E8 ?? ?? ?? ?? 48 8B F0 48 85 DB 74 ?? 33 C0 66 89 44 24 20 38 46 53",
+            11,
+        },
+    };
+
+    const auto outcome = ScanInSections(kPatterns, sizeof(kPatterns) / sizeof(kPatterns[0]));
+    if (outcome.status == ScanStatus::Ambiguous) {
+        Log("scanner: stamina-ab00 found multiple matches, install failed");
+        return 0;
+    }
+
+    if (outcome.status != ScanStatus::Unique) {
+        Log("scanner: stamina-ab00 found 0 matches");
+        return 0;
+    }
+
+    return outcome.address;
+}
+
+uintptr_t ScanForSpiritDeltaAccess() {
+    static constexpr PatternDefinition kPatterns[] = {
+        {
+            "primary",
+            "48 89 ?? 48 89 ?? E8 ?? ?? ?? ?? 84 C0 75 ?? 48 8B 5C 24 ?? 48 8B 74 24 ?? 48 83 C4 ?? 5F C3",
+            6,
+        },
+        {
+            "fallback",
+            "49 89 D8 48 89 FA 48 89 C1 48 89 C6 E8 ?? ?? ?? ?? 84 C0 75 ?? 48 8B 5C 24 30 48 8B 74 24 40 48 83 C4 20 5F C3",
+            12,
+        },
+    };
+
+    const auto outcome = ScanInSections(kPatterns, sizeof(kPatterns) / sizeof(kPatterns[0]));
+    if (outcome.status == ScanStatus::Ambiguous) {
+        Log("scanner: spirit-delta found multiple matches, install failed");
+        return 0;
+    }
+
+    if (outcome.status != ScanStatus::Unique) {
+        Log("scanner: spirit-delta found 0 matches");
         return 0;
     }
 

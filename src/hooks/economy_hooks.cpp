@@ -1,5 +1,6 @@
 #include "hooks/hooks_internal.h"
 
+#include "config.h"
 #include "logger.h"
 #include "mod_logic.h"
 #include "position_control.h"
@@ -10,6 +11,8 @@
 #include <utility>
 
 namespace {
+
+constexpr int32_t kHealthStatusId = 0;
 
 void DamageCallback(SafetyHookContext& ctx) {
     uintptr_t return_address = 0;
@@ -26,19 +29,30 @@ void DamageCallback(SafetyHookContext& ctx) {
     }
 
     __try {
-        int64_t adjusted_delta = static_cast<int64_t>(ctx.r9);
-        if (TryScalePlayerDamage(ctx.rcx,
-                                 static_cast<int32_t>(ctx.rdx & 0xFFFFu),
-                                 return_address,
-                                 source_context,
-                                 &adjusted_delta)) {
-            ctx.r9 = static_cast<uintptr_t>(adjusted_delta);
-            if (ShouldLogSample(g_damage_samples, 24)) {
-                Log("hooks: damage scaled target=0x%p final=%lld sourceCtx=0x%p ret=0x%p",
+            const int32_t status_id = static_cast<int32_t>(ctx.rdx & 0xFFFFu);
+            int64_t adjusted_delta = static_cast<int64_t>(ctx.r9);
+            const bool relevant_event =
+                IsRelevantDamageEvent(ctx.rcx, status_id, source_context, adjusted_delta);
+            if (relevant_event) {
+                Log("hooks: damage callback target=0x%p delta=%lld sourceCtx=0x%p ret=0x%p",
                     reinterpret_cast<void*>(ctx.rcx),
                     static_cast<long long>(adjusted_delta),
                     reinterpret_cast<void*>(source_context),
                     reinterpret_cast<void*>(return_address));
+        }
+
+            if (TryScalePlayerDamage(ctx.rcx,
+                                     status_id,
+                                     return_address,
+                                     source_context,
+                                     &adjusted_delta)) {
+                ctx.r9 = static_cast<uintptr_t>(adjusted_delta);
+                if (relevant_event) {
+                    Log("hooks: damage scaled target=0x%p final=%lld sourceCtx=0x%p ret=0x%p",
+                        reinterpret_cast<void*>(ctx.rcx),
+                        static_cast<long long>(adjusted_delta),
+                        reinterpret_cast<void*>(source_context),
+                        reinterpret_cast<void*>(return_address));
             }
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -49,7 +63,8 @@ void DamageCallback(SafetyHookContext& ctx) {
 }
 
 void ItemGainCallback(SafetyHookContext& ctx) {
-    const bool log_sample = ShouldLogSample(g_item_gain_samples, 16);
+    const bool player_ready = GetTrackedPlayerStatusMarker() >= kMinimumPointerAddress;
+    const bool log_sample = player_ready && ShouldLogSample(g_item_gain_samples, 16);
     if (log_sample) {
         Log("hooks: item-gain callback target=0x%p amount=%lld rip=0x%p",
             reinterpret_cast<void*>(ctx.r8 + ctx.rdi + 0x10),
@@ -136,8 +151,17 @@ bool InstallItemGainHook() {
 }  // namespace
 
 bool InstallEconomyHooks() {
-    return InstallDamageHook() &&
-           InstallItemGainHook();
+    const auto config = GetConfig();
+
+    if (ShouldInstallDamageHook(config) && !InstallDamageHook()) {
+        Log("hooks: damage hook unavailable; continuing without damage scaling");
+    }
+
+    if (ShouldInstallItemGainHook(config) && !InstallItemGainHook()) {
+        Log("hooks: item-gain hook unavailable; continuing without item gain scaling");
+    }
+
+    return true;
 }
 
 void RemoveEconomyHooks() {

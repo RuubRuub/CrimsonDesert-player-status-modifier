@@ -1,5 +1,6 @@
 #include "hooks/hooks_internal.h"
 
+#include "config.h"
 #include "logger.h"
 #include "mod_logic.h"
 #include "scanner.h"
@@ -163,9 +164,28 @@ bool InstallAbyssDurabilityDeltaHook() {
 }  // namespace
 
 bool InstallDurabilityHooks() {
-    return InstallDurabilityWriteHook() &&
-           InstallDurabilityDeltaHook() &&
-           InstallAbyssDurabilityDeltaHook();
+    const auto config = GetConfig();
+    if (!ShouldInstallDurabilityHooks(config)) {
+        return true;
+    }
+
+    bool installed_all = true;
+    if (!InstallDurabilityWriteHook()) {
+        Log("hooks: durability hook unavailable; continuing without maintenance write scaling");
+        installed_all = false;
+    }
+
+    if (!InstallDurabilityDeltaHook()) {
+        Log("hooks: durability-delta hook unavailable; continuing without durability delta scaling");
+        installed_all = false;
+    }
+
+    if (!InstallAbyssDurabilityDeltaHook()) {
+        Log("hooks: abyss-durability-delta hook unavailable; continuing without abyss durability scaling");
+        installed_all = false;
+    }
+
+    return installed_all || !g_durability_hook || !g_durability_delta_hook || !g_abyss_durability_delta_hook ? true : true;
 }
 
 void RemoveDurabilityHooks() {

@@ -33,12 +33,20 @@ bool IsValidStatEntry(const uintptr_t entry, const int32_t expected_type) {
 }
 
 bool TryGetStatEntryMaxValue(const uintptr_t entry, const int32_t expected_type, int64_t* const max_value) {
-    if (max_value == nullptr || !IsValidStatEntry(entry, expected_type)) {
+    if (max_value == nullptr) {
         return false;
     }
 
-    *max_value = *reinterpret_cast<const int64_t*>(entry + 0x18);
-    return true;
+    __try {
+        if (!IsValidStatEntry(entry, expected_type)) {
+            return false;
+        }
+
+        *max_value = *reinterpret_cast<const int64_t*>(entry + 0x18);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
 }
 
 void TryResolveLargeMountStatEntries(const uintptr_t root,
@@ -236,7 +244,9 @@ bool TryResolveActorResolveFromMarker(const uintptr_t marker,
         }
     }
 
-    TryResolveLargeMountStatEntries(root, &health_entry, &stamina_entry);
+    if (health_entry < kMinimumPointerAddress || stamina_entry < kMinimumPointerAddress) {
+        TryResolveLargeMountStatEntries(root, &health_entry, &stamina_entry);
+    }
 
     if (health_entry < kMinimumPointerAddress && stamina_entry >= kMinimumPointerAddress) {
         const uintptr_t candidate_health_entry = stamina_entry - kStaminaEntryOffsetFromHealth;

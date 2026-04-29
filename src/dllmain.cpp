@@ -8,12 +8,14 @@
 
 #include <Windows.h>
 
+#include <cwchar>
 #include <filesystem>
 #include <string>
 
 namespace {
 
 HMODULE g_module = nullptr;
+constexpr wchar_t kTargetProcessName[] = L"CrimsonDesert.exe";
 
 std::wstring GetSiblingPath(const wchar_t* file_name) {
     std::wstring module_path(MAX_PATH, L'\0');
@@ -25,17 +27,43 @@ std::wstring GetSiblingPath(const wchar_t* file_name) {
     return path.wstring();
 }
 
+std::wstring GetHostProcessPath() {
+    std::wstring process_path(MAX_PATH, L'\0');
+    const DWORD length = GetModuleFileNameW(nullptr, process_path.data(), static_cast<DWORD>(process_path.size()));
+    process_path.resize(length);
+    return process_path;
+}
+
+bool IsTargetHostProcess(const std::wstring& process_path) {
+    if (process_path.empty()) {
+        return false;
+    }
+
+    const auto file_name = std::filesystem::path(process_path).filename().wstring();
+    return _wcsicmp(file_name.c_str(), kTargetProcessName) == 0;
+}
+
 DWORD WINAPI InitializeMod(LPVOID) {
-    const auto config_path = GetSiblingPath(L"player-status-modifier.ini");
-    const auto log_path = GetSiblingPath(L"player-status-modifier.log");
+    const auto host_process_path = GetHostProcessPath();
+    if (!IsTargetHostProcess(host_process_path)) {
+        return 0;
+    }
 
-    LoadConfig(config_path);
-    InitializeLogger(log_path, GetConfig().general.log_enabled);
+        const auto config_path = GetSiblingPath(L"player-status-modifier.ini");
+        const auto log_path = GetSiblingPath(L"player-status-modifier.log");
 
-    Log("dllmain: initialization started");
-    Log("dllmain: config path = %ls", config_path.c_str());
+        LoadConfig(config_path);
+        const ModConfig initial_config = GetConfig();
+        InitializeLogger(log_path,
+                         initial_config.general.log_enabled,
+                         initial_config.general.verbose,
+                         initial_config.general.max_log_lines);
 
-    const auto init_delay = GetConfig().general.init_delay_ms;
+        Log("dllmain: initialization started");
+        Log("dllmain: host process = %ls", host_process_path.c_str());
+        Log("dllmain: config path = %ls", config_path.c_str());
+
+        const auto init_delay = initial_config.general.init_delay_ms;
     if (init_delay > 0) {
         Sleep(init_delay);
     }
