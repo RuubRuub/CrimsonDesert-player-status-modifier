@@ -49,12 +49,12 @@ bool ShouldSkipDurabilityConsumption(const uintptr_t entry, const double chance)
 }  // namespace
 
 bool TryAdjustDurabilityWrite(const uintptr_t entry, uint16_t* const value) {
-    if (!g_runtime_enabled.load(std::memory_order_acquire) || value == nullptr || !IsPlayerRuntimeReady()) {
+    if (!g_runtime_enabled.load(std::memory_order_acquire) || value == nullptr) {
         return false;
     }
 
     const auto& config = GetConfig();
-    if (!config.general.enabled || !config.durability.enabled || entry < kMinimumPointerAddress) {
+    if (!config.general.enabled || entry < kMinimumPointerAddress) {
         return false;
     }
 
@@ -88,17 +88,17 @@ bool TryAdjustDurabilityWrite(const uintptr_t entry, uint16_t* const value) {
 }
 
 bool TryAdjustDurabilityDelta(const uintptr_t entry, const uint16_t current_value, int16_t* const delta) {
-    if (!g_runtime_enabled.load(std::memory_order_acquire) || delta == nullptr || !IsPlayerRuntimeReady()) {
+    if (!g_runtime_enabled.load(std::memory_order_acquire) || delta == nullptr) {
         return false;
     }
 
     const auto& config = GetConfig();
-    if (!config.general.enabled || !config.durability.enabled || entry < kMinimumPointerAddress) {
+    if (!config.general.enabled || entry < kMinimumPointerAddress) {
         return false;
     }
 
     const double chance = config.durability.consumption_chance;
-    if (chance >= 100.0 || *delta >= 0) {
+    if (chance >= 100.0 || *delta == 0) {
         return false;
     }
 

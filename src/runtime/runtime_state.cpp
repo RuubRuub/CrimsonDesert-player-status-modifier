@@ -3,6 +3,7 @@
 std::mutex g_state_mutex;
 ActorResolveSnapshot g_player_resolve{};
 ActorResolveSnapshot g_mount_resolve{};
+std::atomic<ULONGLONG> g_mount_last_seen_tick{0};
 std::atomic<bool> g_mount_resolver_running{false};
 std::thread g_mount_resolver_thread{};
 std::array<std::atomic<uintptr_t>, kTrackedDamageParticipantCount> g_tracked_damage_participants{};
@@ -88,6 +89,7 @@ void ResetTrackedEntriesLocked() {}
 
 void ResetTrackedMountLocked() {
     g_mount_resolve = {};
+    g_mount_last_seen_tick.store(0, std::memory_order_release);
 }
 
 void ResetTrackedDamageParticipantsLocked() {

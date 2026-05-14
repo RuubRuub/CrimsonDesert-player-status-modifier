@@ -170,10 +170,7 @@ bool InstallDurabilityHooks() {
     }
 
     bool installed_all = true;
-    if (!InstallDurabilityWriteHook()) {
-        Log("hooks: durability hook unavailable; continuing without maintenance write scaling");
-        installed_all = false;
-    }
+    Log("hooks: durability maintenance write hook disabled for startup stability; delta hooks remain active");
 
     if (!InstallDurabilityDeltaHook()) {
         Log("hooks: durability-delta hook unavailable; continuing without durability delta scaling");
@@ -185,7 +182,7 @@ bool InstallDurabilityHooks() {
         installed_all = false;
     }
 
-    return installed_all || !g_durability_hook || !g_durability_delta_hook || !g_abyss_durability_delta_hook ? true : true;
+    return installed_all;
 }
 
 void RemoveDurabilityHooks() {

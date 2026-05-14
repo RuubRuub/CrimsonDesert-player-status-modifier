@@ -22,6 +22,59 @@ uintptr_t TryGetTrackedMountTargetOwner() {
     return g_mount_resolve.damage_target;
 }
 
+bool TryReadStatEntryValues(const uintptr_t entry,
+                            const int32_t expected_type,
+                            int64_t* const current_value,
+                            int64_t* const max_value) {
+    if (current_value == nullptr || max_value == nullptr || entry < kMinimumPointerAddress) {
+        return false;
+    }
+
+    __try {
+        if (*reinterpret_cast<const int32_t*>(entry) != expected_type) {
+            return false;
+        }
+
+        const int64_t current = *reinterpret_cast<const int64_t*>(entry + 0x08);
+        const int64_t maximum = *reinterpret_cast<const int64_t*>(entry + 0x18);
+        if (maximum <= 0 || current < 0 || current > maximum) {
+            return false;
+        }
+
+        *current_value = current;
+        *max_value = maximum;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+int64_t ClampMountLockValue(const int64_t requested_value, const int64_t max_value) {
+    if (max_value <= 0) {
+        return 0;
+    }
+
+    if (requested_value <= 0) {
+        return max_value;
+    }
+
+    return requested_value > max_value ? max_value : requested_value;
+}
+
+void ClampScaledSignedDelta(const double scaled, int64_t* const value) {
+    if (value == nullptr) {
+        return;
+    }
+
+    if (scaled <= static_cast<double>(std::numeric_limits<int64_t>::min())) {
+        *value = std::numeric_limits<int64_t>::min();
+    } else if (scaled >= static_cast<double>(std::numeric_limits<int64_t>::max())) {
+        *value = std::numeric_limits<int64_t>::max();
+    } else {
+        *value = static_cast<int64_t>(scaled);
+    }
+}
+
 bool IsTrackedDamageParticipant(const uintptr_t candidate) {
     if (candidate < kMinimumPointerAddress) {
         return false;
@@ -56,6 +109,10 @@ void TrackDamageParticipant(const uintptr_t candidate) {
     g_tracked_damage_participants[index].store(candidate, std::memory_order_release);
 }
 
+bool ShouldLogDamageRuntime() {
+    return g_damage_logs.fetch_add(1, std::memory_order_acq_rel) < 64;
+}
+
 bool IsRelatedDamageParticipant(const uintptr_t candidate, const int depth) {
     if (candidate < kMinimumPointerAddress || depth < 0) {
         return false;
@@ -66,12 +123,16 @@ bool IsRelatedDamageParticipant(const uintptr_t candidate, const int depth) {
     }
 
     std::array<uintptr_t, 8> related{};
-    for (size_t index = 0; index < related.size(); ++index) {
-        const uintptr_t nested = *reinterpret_cast<const uintptr_t*>(candidate + index * sizeof(uintptr_t));
-        related[index] = nested;
-        if (IsTrackedDamageParticipant(nested)) {
-            return true;
+    __try {
+        for (size_t index = 0; index < related.size(); ++index) {
+            const uintptr_t nested = *reinterpret_cast<const uintptr_t*>(candidate + index * sizeof(uintptr_t));
+            related[index] = nested;
+            if (IsTrackedDamageParticipant(nested)) {
+                return true;
+            }
         }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
     }
 
     if (depth == 0) {
@@ -105,7 +166,13 @@ bool IsOutgoingPlayerDamageSource(const uintptr_t source_context) {
         return false;
     }
 
-    const uintptr_t source_actor = *reinterpret_cast<const uintptr_t*>(source_context + 0x68);
+    uintptr_t source_actor = 0;
+    __try {
+        source_actor = *reinterpret_cast<const uintptr_t*>(source_context + 0x68);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+
     if (source_actor < kMinimumPointerAddress) {
         return false;
     }
@@ -128,7 +195,13 @@ bool IsOutgoingPlayerDamageSource(const uintptr_t source_context) {
         return true;
     }
 
-    const uintptr_t source_marker = *reinterpret_cast<const uintptr_t*>(source_actor + 0x20);
+    uintptr_t source_marker = 0;
+    __try {
+        source_marker = *reinterpret_cast<const uintptr_t*>(source_actor + 0x20);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+
     if (source_marker >= kMinimumPointerAddress) {
         TrackDamageParticipant(source_marker);
     }
@@ -187,6 +260,9 @@ bool TryScalePlayerDamage(const uintptr_t target,
     }
 
     UpdateTrackedMountFromHealthRoot(target);
+    if (config.mount.enabled && config.mount.lock_health && *value < 0) {
+        RelockTrackedMountStats();
+    }
 
     const uintptr_t mount_target_owner = TryGetTrackedMountTargetOwner();
     if (config.mount.enabled &&
@@ -195,19 +271,29 @@ bool TryScalePlayerDamage(const uintptr_t target,
         target >= kMinimumPointerAddress &&
         mount_target_owner >= kMinimumPointerAddress &&
         target == mount_target_owner) {
-        if (*value == std::numeric_limits<int64_t>::min()) {
-            *value = std::numeric_limits<int64_t>::max();
-        } else {
-            *value = -*value;
+        const int64_t original_delta = *value;
+        const ActorResolveSnapshot mount_snapshot = g_mount_resolve;
+        int64_t current_value = 0;
+        int64_t max_value = 0;
+        if (TryReadStatEntryValues(mount_snapshot.health_entry, kHealthId, &current_value, &max_value)) {
+            const int64_t locked_value = ClampMountLockValue(config.mount.lock_value, max_value);
+            *value = locked_value - current_value;
+
+            if (ShouldLogDamageRuntime()) {
+                Log("runtime: scaled damage direction=%s target=0x%p sourceCtx=0x%p old_delta=%lld current=%lld lock=%lld max=%lld final_delta=%lld",
+                    "mount-lock-health",
+                    reinterpret_cast<void*>(target),
+                    reinterpret_cast<void*>(source_context),
+                    static_cast<long long>(original_delta),
+                    static_cast<long long>(current_value),
+                    static_cast<long long>(locked_value),
+                    static_cast<long long>(max_value),
+                    static_cast<long long>(*value));
+            }
+            return true;
         }
 
-        g_damage_logs.fetch_add(1, std::memory_order_acq_rel);
-        Log("runtime: scaled damage direction=%s target=0x%p sourceCtx=0x%p final=%lld",
-            "mount-lock-health",
-            reinterpret_cast<void*>(target),
-            reinterpret_cast<void*>(source_context),
-            static_cast<long long>(*value));
-        return true;
+        return false;
     }
 
     const uintptr_t player_target_owner = TryGetTrackedPlayerTargetOwner();
@@ -228,13 +314,14 @@ bool TryScalePlayerDamage(const uintptr_t target,
             *value = static_cast<int64_t>(scaled);
         }
 
-        g_damage_logs.fetch_add(1, std::memory_order_acq_rel);
-        Log("runtime: scaled damage direction=%s target=0x%p sourceCtx=0x%p final=%lld multiplier=%.3f",
-            "incoming-heal",
-            reinterpret_cast<void*>(target),
-            reinterpret_cast<void*>(source_context),
-            static_cast<long long>(*value),
-            config.health.heal_multiplier);
+        if (ShouldLogDamageRuntime()) {
+            Log("runtime: scaled damage direction=%s target=0x%p sourceCtx=0x%p final=%lld multiplier=%.3f",
+                "incoming-heal",
+                reinterpret_cast<void*>(target),
+                reinterpret_cast<void*>(source_context),
+                static_cast<long long>(*value),
+                config.health.heal_multiplier);
+        }
 
         return true;
     }
@@ -246,8 +333,32 @@ bool TryScalePlayerDamage(const uintptr_t target,
     DamageChannelConfig channel{};
     const char* direction = nullptr;
     if (target >= kMinimumPointerAddress && player_target_owner >= kMinimumPointerAddress && target == player_target_owner) {
-        channel = config.damage.incoming;
-        direction = "incoming-damage";
+        double effective_multiplier = config.health.consumption_multiplier;
+        if (config.damage.incoming.enabled) {
+            effective_multiplier *= config.damage.incoming.multiplier;
+        }
+
+        if (effective_multiplier == 1.0) {
+            return false;
+        }
+
+        const int64_t original_delta = *value;
+        const double scaled = std::floor(static_cast<double>(*value) * effective_multiplier);
+        ClampScaledSignedDelta(scaled, value);
+
+        if (ShouldLogDamageRuntime()) {
+            Log("runtime: scaled damage direction=%s target=0x%p sourceCtx=0x%p old_delta=%lld final=%lld health_multiplier=%.3f incoming_enabled=%d incoming_multiplier=%.3f effective_multiplier=%.3f",
+                "incoming-damage",
+                reinterpret_cast<void*>(target),
+                reinterpret_cast<void*>(source_context),
+                static_cast<long long>(original_delta),
+                static_cast<long long>(*value),
+                config.health.consumption_multiplier,
+                config.damage.incoming.enabled ? 1 : 0,
+                config.damage.incoming.multiplier,
+                effective_multiplier);
+        }
+        return true;
     } else if (IsOutgoingPlayerDamageSource(source_context)) {
         channel = config.damage.outgoing;
         direction = "outgoing-damage";
@@ -260,21 +371,16 @@ bool TryScalePlayerDamage(const uintptr_t target,
     }
 
     const double scaled = std::floor(static_cast<double>(*value) * channel.multiplier);
-    if (scaled <= static_cast<double>(std::numeric_limits<int64_t>::min())) {
-        *value = std::numeric_limits<int64_t>::min();
-    } else if (scaled >= static_cast<double>(std::numeric_limits<int64_t>::max())) {
-        *value = std::numeric_limits<int64_t>::max();
-    } else {
-        *value = static_cast<int64_t>(scaled);
-    }
+    ClampScaledSignedDelta(scaled, value);
 
-    g_damage_logs.fetch_add(1, std::memory_order_acq_rel);
-    Log("runtime: scaled damage direction=%s target=0x%p sourceCtx=0x%p final=%lld multiplier=%.3f",
-        direction,
-        reinterpret_cast<void*>(target),
-        reinterpret_cast<void*>(source_context),
-        static_cast<long long>(*value),
-        channel.multiplier);
+    if (ShouldLogDamageRuntime()) {
+        Log("runtime: scaled damage direction=%s target=0x%p sourceCtx=0x%p final=%lld multiplier=%.3f",
+            direction,
+            reinterpret_cast<void*>(target),
+            reinterpret_cast<void*>(source_context),
+            static_cast<long long>(*value),
+            channel.multiplier);
+    }
 
     return true;
 }

@@ -19,6 +19,10 @@ SafetyHookMid g_damage_hook{};
 SafetyHookMid g_item_gain_hook{};
 SafetyHookMid g_affinity_hook{};
 SafetyHookMid g_affinity_current_hook{};
+SafetyHookMid g_affinity_vary_hook{};
+SafetyHookMid g_affinity_vary_logout_hook{};
+SafetyHookMid g_affinity_pet_diag_reloc_hook{};
+SafetyHookMid g_affinity_pet_diag_rsrc_hook{};
 SafetyHookMid g_durability_hook{};
 SafetyHookMid g_durability_delta_hook{};
 SafetyHookMid g_abyss_durability_delta_hook{};
@@ -31,6 +35,8 @@ std::atomic<bool> g_reported_stamina_ab00_exception{false};
 std::atomic<bool> g_reported_damage_exception{false};
 std::atomic<bool> g_reported_item_gain_exception{false};
 std::atomic<bool> g_reported_affinity_exception{false};
+std::atomic<bool> g_reported_affinity_current_exception{false};
+std::atomic<bool> g_reported_affinity_probe_exception{false};
 std::atomic<bool> g_reported_durability_exception{false};
 std::atomic<bool> g_reported_durability_delta_exception{false};
 std::atomic<bool> g_reported_abyss_durability_delta_exception{false};
@@ -43,6 +49,7 @@ std::atomic<std::uint32_t> g_stamina_ab00_samples{0};
 std::atomic<std::uint32_t> g_damage_samples{0};
 std::atomic<std::uint32_t> g_item_gain_samples{0};
 std::atomic<std::uint32_t> g_affinity_samples{0};
+std::atomic<std::uint32_t> g_affinity_probe_samples{0};
 std::atomic<std::uint32_t> g_durability_samples{0};
 std::atomic<std::uint32_t> g_durability_delta_samples{0};
 std::atomic<std::uint32_t> g_abyss_durability_delta_samples{0};
@@ -68,16 +75,24 @@ bool AreEconomyHooksInstalled(const ModConfig& config) {
 }
 
 bool AreAffinityHooksInstalled(const ModConfig& config) {
-    return !ShouldInstallAffinityHook(config) || g_affinity_hook || g_affinity_current_hook;
+    if (!ShouldInstallAffinityHook(config)) {
+        return true;
+    }
+
+    const bool legacy_pair = g_affinity_hook && g_affinity_current_hook;
+    const bool friendly_pair = g_affinity_vary_hook && g_affinity_vary_logout_hook;
+    const bool pet_diag_pair = config.affinity.pet_diagnostics &&
+                               (g_affinity_pet_diag_reloc_hook || g_affinity_pet_diag_rsrc_hook);
+    return legacy_pair || friendly_pair || pet_diag_pair;
 }
 
 bool AreDurabilityHooksInstalled(const ModConfig& config) {
     return !ShouldInstallDurabilityHooks(config) ||
-           (g_durability_hook && g_durability_delta_hook && g_abyss_durability_delta_hook);
+           (g_durability_delta_hook && g_abyss_durability_delta_hook);
 }
 
 void LogHookLoadout(const ModConfig& config) {
-    Log("hooks: loadout player-pointer=%d shared-stats=%d stat-write=%d spirit-delta=%d stamina-ab00=%d damage=%d items=%d affinity-prepare=%d affinity-current=%d durability=%d dragon-village=%d dragon-flying=%d dragon-roof=%d position=%d",
+    Log("hooks: loadout player-pointer=%d shared-stats=%d stat-write=%d spirit-delta=%d stamina-ab00=%d damage=%d items=%d affinity-prepare=%d affinity-current=%d affinity-vary=%d affinity-logout=%d affinity-petdiag-reloc=%d affinity-petdiag-rsrc=%d durability=%d dragon-village=%d dragon-flying=%d dragon-roof=%d position=%d",
         g_player_pointer_hook ? 1 : 0,
         AreSharedStatHooksInstalled(config) ? 1 : 0,
         g_stat_write_hook ? 1 : 0,
@@ -87,7 +102,11 @@ void LogHookLoadout(const ModConfig& config) {
         g_item_gain_hook ? 1 : 0,
         g_affinity_hook ? 1 : 0,
         g_affinity_current_hook ? 1 : 0,
-        (g_durability_hook && g_durability_delta_hook && g_abyss_durability_delta_hook) ? 1 : 0,
+        g_affinity_vary_hook ? 1 : 0,
+        g_affinity_vary_logout_hook ? 1 : 0,
+        g_affinity_pet_diag_reloc_hook ? 1 : 0,
+        g_affinity_pet_diag_rsrc_hook ? 1 : 0,
+        AreDurabilityHooksInstalled(config) ? 1 : 0,
         g_dragon_village_summon_hook ? 1 : 0,
         g_dragon_flying_restrict_hook ? 1 : 0,
         g_dragon_roof_restrict_hook ? 1 : 0,

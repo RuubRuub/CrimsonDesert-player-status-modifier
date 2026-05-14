@@ -1,11 +1,16 @@
 #include "config.h"
 
+#include <Windows.h>
+
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cwchar>
+#include <filesystem>
 #include <memory>
 #include <mutex>
+#include <vector>
 
 namespace {
 
@@ -28,6 +33,22 @@ bool HasIniKey(const wchar_t* section, const wchar_t* key, const std::wstring& p
                path.c_str()) > 0;
 }
 
+bool ReadBoolAlias(const wchar_t* section,
+                   const wchar_t* canonical_key,
+                   const wchar_t* alias_key,
+                   const bool default_value,
+                   const std::wstring& path) {
+    if (HasIniKey(section, canonical_key, path)) {
+        return ReadBool(section, canonical_key, default_value, path);
+    }
+
+    if (alias_key != nullptr && HasIniKey(section, alias_key, path)) {
+        return ReadBool(section, alias_key, default_value, path);
+    }
+
+    return default_value;
+}
+
 DWORD ReadDword(const wchar_t* section, const wchar_t* key, const DWORD default_value, const std::wstring& path) {
     return static_cast<DWORD>(GetPrivateProfileIntW(section, key, static_cast<int>(default_value), path.c_str()));
 }
@@ -35,7 +56,12 @@ DWORD ReadDword(const wchar_t* section, const wchar_t* key, const DWORD default_
 double ReadDoubleRaw(const wchar_t* section, const wchar_t* key, const double default_value, const std::wstring& path) {
     wchar_t buffer[64]{};
     const auto default_text = std::to_wstring(default_value);
-    GetPrivateProfileStringW(section, key, default_text.c_str(), buffer, static_cast<DWORD>(sizeof(buffer) / sizeof(buffer[0])), path.c_str());
+    GetPrivateProfileStringW(section,
+                             key,
+                             default_text.c_str(),
+                             buffer,
+                             static_cast<DWORD>(sizeof(buffer) / sizeof(buffer[0])),
+                             path.c_str());
 
     wchar_t* end = nullptr;
     const double parsed = std::wcstod(buffer, &end);
@@ -55,6 +81,84 @@ double ReadDouble(const wchar_t* section, const wchar_t* key, const double defau
     return parsed;
 }
 
+void ReadBoolIfPresent(const wchar_t* section,
+                       const wchar_t* key,
+                       bool* const target,
+                       const std::wstring& path) {
+    if (target != nullptr && HasIniKey(section, key, path)) {
+        *target = ReadBool(section, key, *target, path);
+    }
+}
+
+void ReadBoolAliasIfPresent(const wchar_t* section,
+                            const wchar_t* canonical_key,
+                            const wchar_t* alias_key,
+                            bool* const target,
+                            const std::wstring& path) {
+    if (target != nullptr && (HasIniKey(section, canonical_key, path) ||
+                             (alias_key != nullptr && HasIniKey(section, alias_key, path)))) {
+        *target = ReadBoolAlias(section, canonical_key, alias_key, *target, path);
+    }
+}
+
+void ReadDwordIfPresent(const wchar_t* section,
+                        const wchar_t* key,
+                        DWORD* const target,
+                        const std::wstring& path) {
+    if (target != nullptr && HasIniKey(section, key, path)) {
+        *target = ReadDword(section, key, *target, path);
+    }
+}
+
+void ReadDoubleIfPresent(const wchar_t* section,
+                         const wchar_t* key,
+                         double* const target,
+                         const std::wstring& path) {
+    if (target != nullptr && HasIniKey(section, key, path)) {
+        *target = ReadDouble(section, key, *target, path);
+    }
+}
+
+void ReadDoubleRawIfPresent(const wchar_t* section,
+                            const wchar_t* key,
+                            double* const target,
+                            const std::wstring& path) {
+    if (target != nullptr && HasIniKey(section, key, path)) {
+        *target = ReadDoubleRaw(section, key, *target, path);
+    }
+}
+
+bool IsRegularFile(const std::filesystem::path& path) {
+    std::error_code ec;
+    return std::filesystem::is_regular_file(path, ec);
+}
+
+bool IsPrimaryConfigName(const std::filesystem::path& path) {
+    return _wcsicmp(path.filename().c_str(), L"player-status-modifier.ini") == 0;
+}
+
+bool IsDefaultConfigName(const std::filesystem::path& path) {
+    return _wcsicmp(path.filename().c_str(), L"player-status-modifier.default.ini") == 0;
+}
+
+bool IsLayerConfigName(const std::filesystem::path& path) {
+    const auto file_name = path.filename().wstring();
+    constexpr wchar_t kPrefix[] = L"player-status-modifier.";
+    constexpr wchar_t kSuffix[] = L".ini";
+    constexpr std::size_t kPrefixLength = (sizeof(kPrefix) / sizeof(kPrefix[0])) - 1;
+    constexpr std::size_t kSuffixLength = (sizeof(kSuffix) / sizeof(kSuffix[0])) - 1;
+
+    if (file_name.size() <= kPrefixLength + kSuffixLength) {
+        return false;
+    }
+
+    if (_wcsnicmp(file_name.c_str(), kPrefix, kPrefixLength) != 0) {
+        return false;
+    }
+
+    return _wcsicmp(file_name.c_str() + file_name.size() - kSuffixLength, kSuffix) == 0;
+}
+
 double ClampDouble(const double value, const double minimum, const double maximum, const double fallback) {
     if (!std::isfinite(value)) {
         return fallback;
@@ -71,20 +175,151 @@ double ClampDouble(const double value, const double minimum, const double maximu
     return value;
 }
 
+void ApplyConfigLayer(const std::wstring& path, ModConfig* const next) {
+    if (next == nullptr) {
+        return;
+    }
+
+    ReadBoolIfPresent(L"General", L"Enabled", &next->general.enabled, path);
+    ReadBoolIfPresent(L"General", L"LogEnabled", &next->general.log_enabled, path);
+    ReadBoolIfPresent(L"General", L"Verbose", &next->general.verbose, path);
+    ReadDwordIfPresent(L"General", L"MaxLogLines", &next->general.max_log_lines, path);
+    ReadDwordIfPresent(L"General", L"InitDelayMs", &next->general.init_delay_ms, path);
+    ReadDwordIfPresent(L"General", L"StaleComponentMs", &next->general.stale_component_ms, path);
+    ReadDwordIfPresent(L"General", L"RelockIdleMs", &next->general.relock_idle_ms, path);
+
+    if (HasIniKey(L"Damage", L"Multiplier", path)) {
+        next->damage.outgoing.enabled = true;
+        next->damage.outgoing.multiplier =
+            ReadDouble(L"Damage", L"Multiplier", next->damage.outgoing.multiplier, path);
+    }
+
+    ReadBoolAliasIfPresent(L"OutgoingDamage", L"Enabled", L"Enable", &next->damage.outgoing.enabled, path);
+    ReadBoolIfPresent(L"OutgoingDamage", L"UseStatWriteFallback", &next->damage.outgoing.stat_write_fallback, path);
+    ReadDoubleIfPresent(L"OutgoingDamage", L"Multiplier", &next->damage.outgoing.multiplier, path);
+    ReadBoolIfPresent(L"OutgoingDamage", L"ToggleEnable", &next->damage_toggle.enabled, path);
+    if (HasIniKey(L"OutgoingDamage", L"ToggleKey", path)) {
+        DWORD toggle_key = static_cast<DWORD>(next->damage_toggle.key);
+        ReadDwordIfPresent(L"OutgoingDamage", L"ToggleKey", &toggle_key, path);
+        next->damage_toggle.key = static_cast<int>(toggle_key);
+    }
+
+    ReadBoolAliasIfPresent(L"IncomingDamage", L"Enabled", L"Enable", &next->damage.incoming.enabled, path);
+    ReadBoolIfPresent(L"IncomingDamage", L"UseStatWriteFallback", &next->damage.incoming.stat_write_fallback, path);
+    ReadDoubleIfPresent(L"IncomingDamage", L"Multiplier", &next->damage.incoming.multiplier, path);
+
+    ReadDoubleIfPresent(L"Items", L"GainMultiplier", &next->items.gain_multiplier, path);
+
+    ReadDoubleIfPresent(L"Affinity", L"Multiplier", &next->affinity.multiplier, path);
+    ReadBoolIfPresent(L"Affinity", L"GiftDiagnostics", &next->affinity.gift_diagnostics, path);
+    ReadBoolIfPresent(L"Affinity", L"PetDiagnostics", &next->affinity.pet_diagnostics, path);
+
+    ReadDoubleRawIfPresent(L"Durability", L"ConsumptionChance", &next->durability.consumption_chance, path);
+
+    ReadBoolAliasIfPresent(L"Mount", L"Enabled", L"Enable", &next->mount.enabled, path);
+    ReadBoolIfPresent(L"Mount", L"LockHealth", &next->mount.lock_health, path);
+    ReadBoolIfPresent(L"Mount", L"LockStamina", &next->mount.lock_stamina, path);
+    if (HasIniKey(L"Mount", L"LockValue", path)) {
+        DWORD lock_value = static_cast<DWORD>(next->mount.lock_value);
+        ReadDwordIfPresent(L"Mount", L"LockValue", &lock_value, path);
+        next->mount.lock_value = static_cast<int64_t>(lock_value);
+    }
+
+    ReadBoolIfPresent(L"DragonLimit",
+                      L"roof_summon_experimental",
+                      &next->dragon_limit.roof_summon_experimental,
+                      path);
+    ReadBoolIfPresent(L"DragonLimit", L"village_summon", &next->dragon_limit.village_summon, path);
+    ReadBoolIfPresent(L"DragonLimit",
+                      L"cancel_restrict_flying",
+                      &next->dragon_limit.cancel_restrict_flying,
+                      path);
+
+    ReadBoolAliasIfPresent(L"Position Control(Height)",
+                           L"Enable",
+                           L"Enabled",
+                           &next->position_control.enabled,
+                           path);
+    if (HasIniKey(L"Position Control(Height)", L"Key", path)) {
+        DWORD key = static_cast<DWORD>(next->position_control.key);
+        ReadDwordIfPresent(L"Position Control(Height)", L"Key", &key, path);
+        next->position_control.key = static_cast<int>(key);
+    }
+    if (HasIniKey(L"Position Control(Height)", L"Amplitude", path)) {
+        double amplitude = static_cast<double>(next->position_control.amplitude);
+        ReadDoubleIfPresent(L"Position Control(Height)", L"Amplitude", &amplitude, path);
+        next->position_control.amplitude = static_cast<float>(amplitude);
+    }
+
+    ReadBoolAliasIfPresent(L"Position Control(Horizontal)",
+                           L"Enable",
+                           L"Enabled",
+                           &next->position_control.horizontal_enabled,
+                           path);
+    if (HasIniKey(L"Position Control(Horizontal)", L"Key", path)) {
+        DWORD key = static_cast<DWORD>(next->position_control.horizontal_key);
+        ReadDwordIfPresent(L"Position Control(Horizontal)", L"Key", &key, path);
+        next->position_control.horizontal_key = static_cast<int>(key);
+    }
+    if (HasIniKey(L"Position Control(Horizontal)", L"Multiplier", path)) {
+        double multiplier = static_cast<double>(next->position_control.horizontal_multiplier);
+        ReadDoubleIfPresent(L"Position Control(Horizontal)", L"Multiplier", &multiplier, path);
+        next->position_control.horizontal_multiplier = static_cast<float>(multiplier);
+    }
+
+    ReadBoolAliasIfPresent(L"Resistance", L"Enabled", L"Enable", &next->resistance.enabled, path);
+    ReadDoubleIfPresent(L"Resistance", L"FireResistance", &next->resistance.fire_resistance, path);
+    ReadDoubleIfPresent(L"Resistance", L"IceResistance", &next->resistance.ice_resistance, path);
+    if (HasIniKey(L"Resistance", L"ElectricityResistance", path)) {
+        ReadDoubleIfPresent(L"Resistance",
+                            L"ElectricityResistance",
+                            &next->resistance.electricity_resistance,
+                            path);
+    } else {
+        ReadDoubleIfPresent(L"Resistance",
+                            L"LightningResistance",
+                            &next->resistance.electricity_resistance,
+                            path);
+    }
+
+    const auto read_stat_section = [&](const wchar_t* const section, StatConfig* const stat) {
+        const bool has_explicit_enable =
+            HasIniKey(section, L"Enabled", path) || HasIniKey(section, L"Enable", path);
+        const bool has_multiplier =
+            HasIniKey(section, L"ConsumptionMultiplier", path) || HasIniKey(section, L"HealMultiplier", path);
+
+        ReadBoolAliasIfPresent(section, L"Enabled", L"Enable", &stat->enabled, path);
+        ReadDoubleIfPresent(section, L"ConsumptionMultiplier", &stat->consumption_multiplier, path);
+        ReadDoubleIfPresent(section, L"HealMultiplier", &stat->heal_multiplier, path);
+
+        // Backward compatibility: pre-split configs used the presence of non-neutral
+        // multipliers as the enable signal and did not include Enabled=1.
+        if (!has_explicit_enable &&
+            has_multiplier &&
+            (stat->consumption_multiplier != 1.0 || stat->heal_multiplier != 1.0)) {
+            stat->enabled = true;
+        }
+    };
+
+    read_stat_section(L"Health", &next->health);
+    read_stat_section(L"Stamina", &next->stamina);
+    read_stat_section(L"Spirit", &next->spirit);
+}
+
 void SanitizeConfig(ModConfig* const next) {
-        if (next == nullptr) {
-            return;
-        }
+    if (next == nullptr) {
+        return;
+    }
 
-        if (next->general.max_log_lines == 0) {
-            next->general.max_log_lines = 2000;
-        } else if (next->general.max_log_lines > 1000000) {
-            next->general.max_log_lines = 1000000;
-        }
+    if (next->general.max_log_lines == 0) {
+        next->general.max_log_lines = 2000;
+    } else if (next->general.max_log_lines > 1000000) {
+        next->general.max_log_lines = 1000000;
+    }
 
-        if (next->general.stale_component_ms == 0) {
-            next->general.stale_component_ms = 60000;
-        }
+    if (next->general.stale_component_ms == 0) {
+        next->general.stale_component_ms = 60000;
+    }
 
     if (next->general.relock_idle_ms == 0) {
         next->general.relock_idle_ms = 10000;
@@ -106,9 +341,17 @@ void SanitizeConfig(ModConfig* const next) {
         next->damage_toggle.key = VK_F8;
     }
 
-    if (!std::isfinite(next->position_control.horizontal_multiplier) || next->position_control.horizontal_multiplier < 0.0f) {
+    if (!std::isfinite(next->position_control.horizontal_multiplier) ||
+        next->position_control.horizontal_multiplier < 0.0f) {
         next->position_control.horizontal_multiplier = 1.5f;
     }
+
+    next->resistance.fire_resistance =
+        ClampDouble(next->resistance.fire_resistance, 0.0, 0.99, 0.0);
+    next->resistance.ice_resistance =
+        ClampDouble(next->resistance.ice_resistance, 0.0, 0.99, 0.0);
+    next->resistance.electricity_resistance =
+        ClampDouble(next->resistance.electricity_resistance, 0.0, 0.99, 0.0);
 
     next->durability.consumption_chance =
         ClampDouble(next->durability.consumption_chance, 0.0, 100.0, 100.0);
@@ -116,9 +359,71 @@ void SanitizeConfig(ModConfig* const next) {
     if (next->mount.lock_value <= 0) {
         next->mount.lock_value = 9999999;
     }
+
+    if (!next->health.enabled) {
+        next->health.consumption_multiplier = 1.0;
+        next->health.heal_multiplier = 1.0;
+    }
+
+    if (!next->stamina.enabled) {
+        next->stamina.consumption_multiplier = 1.0;
+        next->stamina.heal_multiplier = 1.0;
+    }
+
+    if (!next->spirit.enabled) {
+        next->spirit.consumption_multiplier = 1.0;
+        next->spirit.heal_multiplier = 1.0;
+    }
 }
 
 }  // namespace
+
+std::vector<std::wstring> GetConfigMergePaths(const std::wstring& config_path) {
+    std::vector<std::wstring> paths;
+    const std::filesystem::path primary_path(config_path);
+
+    const auto directory = primary_path.parent_path();
+    std::error_code ec;
+    if (!directory.empty() && std::filesystem::is_directory(directory, ec)) {
+        const auto default_path = directory / L"player-status-modifier.default.ini";
+        if (!IsDefaultConfigName(primary_path) && IsRegularFile(default_path)) {
+            paths.push_back(default_path.wstring());
+        }
+
+        if (IsRegularFile(primary_path)) {
+            paths.push_back(primary_path.wstring());
+        }
+
+        std::vector<std::filesystem::path> layers;
+        for (const auto& entry : std::filesystem::directory_iterator(directory, ec)) {
+            if (ec) {
+                break;
+            }
+
+            const auto path = entry.path();
+            if (!IsRegularFile(path) ||
+                IsPrimaryConfigName(path) ||
+                IsDefaultConfigName(path) ||
+                !IsLayerConfigName(path)) {
+                continue;
+            }
+
+            layers.push_back(path);
+        }
+
+        std::sort(layers.begin(), layers.end(), [](const auto& left, const auto& right) {
+            return _wcsicmp(left.filename().c_str(), right.filename().c_str()) < 0;
+        });
+
+        for (const auto& layer : layers) {
+            paths.push_back(layer.wstring());
+        }
+    } else if (IsRegularFile(primary_path)) {
+        paths.push_back(primary_path.wstring());
+    }
+
+    return paths;
+}
 
 bool ReadConfigSnapshot(const std::wstring& config_path, ModConfig* const config) {
     if (config == nullptr) {
@@ -126,70 +431,10 @@ bool ReadConfigSnapshot(const std::wstring& config_path, ModConfig* const config
     }
 
     ModConfig next{};
-
-    next.general.enabled = ReadBool(L"General", L"Enabled", next.general.enabled, config_path);
-    next.general.log_enabled = ReadBool(L"General", L"LogEnabled", next.general.log_enabled, config_path);
-    next.general.enable_stat_changes = ReadBool(L"General", L"EnableStatChanges", next.general.enable_stat_changes, config_path);
-    next.general.verbose = ReadBool(L"General", L"Verbose", next.general.verbose, config_path);
-    next.general.max_log_lines =
-        ReadDword(L"General", L"MaxLogLines", next.general.max_log_lines, config_path);
-    next.general.init_delay_ms = ReadDword(L"General", L"InitDelayMs", next.general.init_delay_ms, config_path);
-    next.general.stale_component_ms = ReadDword(L"General", L"StaleComponentMs", next.general.stale_component_ms, config_path);
-    next.general.relock_idle_ms = ReadDword(L"General", L"RelockIdleMs", next.general.relock_idle_ms, config_path);
-
-    const bool has_legacy_damage_multiplier = HasIniKey(L"Damage", L"Multiplier", config_path);
-    const double legacy_damage_multiplier =
-        ReadDouble(L"Damage", L"Multiplier", next.damage.outgoing.multiplier, config_path);
-    next.damage.outgoing.enabled =
-        ReadBool(L"OutgoingDamage", L"Enabled", has_legacy_damage_multiplier, config_path);
-    next.damage.outgoing.multiplier =
-        ReadDouble(L"OutgoingDamage", L"Multiplier", legacy_damage_multiplier, config_path);
-    next.damage_toggle.enabled =
-        ReadBool(L"OutgoingDamage", L"ToggleEnable", next.damage_toggle.enabled, config_path);
-    next.damage_toggle.key = static_cast<int>(
-        ReadDword(L"OutgoingDamage", L"ToggleKey", static_cast<DWORD>(next.damage_toggle.key), config_path));
-    next.damage.incoming.enabled =
-        ReadBool(L"IncomingDamage", L"Enabled", next.damage.incoming.enabled, config_path);
-    next.damage.incoming.multiplier =
-        ReadDouble(L"IncomingDamage", L"Multiplier", next.damage.incoming.multiplier, config_path);
-    next.items.enabled = ReadBool(L"Items", L"Enable", next.items.enabled, config_path);
-    next.items.gain_multiplier = ReadDouble(L"Items", L"GainMultiplier", next.items.gain_multiplier, config_path);
-    next.affinity.multiplier = ReadDouble(L"Affinity", L"Multiplier", next.affinity.multiplier, config_path);
-    next.durability.enabled = ReadBool(L"Durability", L"Enable", next.durability.enabled, config_path);
-    next.durability.consumption_chance =
-        ReadDoubleRaw(L"Durability", L"ConsumptionChance", next.durability.consumption_chance, config_path);
-    next.mount.enabled = ReadBool(L"Mount", L"Enabled", next.mount.enabled, config_path);
-    next.mount.lock_health = ReadBool(L"Mount", L"LockHealth", next.mount.lock_health, config_path);
-    next.mount.lock_stamina = ReadBool(L"Mount", L"LockStamina", next.mount.lock_stamina, config_path);
-    next.mount.lock_value = static_cast<int64_t>(
-        ReadDword(L"Mount", L"LockValue", static_cast<DWORD>(next.mount.lock_value), config_path));
-    next.dragon_limit.roof_summon_experimental =
-        ReadBool(L"DragonLimit", L"roof_summon_experimental", next.dragon_limit.roof_summon_experimental, config_path);
-    next.dragon_limit.village_summon =
-        ReadBool(L"DragonLimit", L"village_summon", next.dragon_limit.village_summon, config_path);
-    next.dragon_limit.cancel_restrict_flying =
-        ReadBool(L"DragonLimit", L"cancel_restrict_flying", next.dragon_limit.cancel_restrict_flying, config_path);
-    next.position_control.enabled =
-        ReadBool(L"Position Control(Height)", L"Enable", next.position_control.enabled, config_path);
-    next.position_control.key =
-        static_cast<int>(ReadDword(L"Position Control(Height)", L"Key", static_cast<DWORD>(next.position_control.key), config_path));
-    next.position_control.amplitude = static_cast<float>(
-        ReadDouble(L"Position Control(Height)", L"Amplitude", next.position_control.amplitude, config_path));
-    next.position_control.horizontal_enabled =
-        ReadBool(L"Position Control(Horizontal)", L"Enable", next.position_control.horizontal_enabled, config_path);
-    next.position_control.horizontal_key = static_cast<int>(
-        ReadDword(L"Position Control(Horizontal)", L"Key", static_cast<DWORD>(next.position_control.horizontal_key), config_path));
-    next.position_control.horizontal_multiplier = static_cast<float>(ReadDouble(
-        L"Position Control(Horizontal)", L"Multiplier", next.position_control.horizontal_multiplier, config_path));
-
-    next.health.consumption_multiplier = ReadDouble(L"Health", L"ConsumptionMultiplier", next.health.consumption_multiplier, config_path);
-    next.health.heal_multiplier = ReadDouble(L"Health", L"HealMultiplier", next.health.heal_multiplier, config_path);
-
-    next.stamina.consumption_multiplier = ReadDouble(L"Stamina", L"ConsumptionMultiplier", next.stamina.consumption_multiplier, config_path);
-    next.stamina.heal_multiplier = ReadDouble(L"Stamina", L"HealMultiplier", next.stamina.heal_multiplier, config_path);
-
-    next.spirit.consumption_multiplier = ReadDouble(L"Spirit", L"ConsumptionMultiplier", next.spirit.consumption_multiplier, config_path);
-    next.spirit.heal_multiplier = ReadDouble(L"Spirit", L"HealMultiplier", next.spirit.heal_multiplier, config_path);
+    const auto paths = GetConfigMergePaths(config_path);
+    for (const auto& path : paths) {
+        ApplyConfigLayer(path, &next);
+    }
 
     SanitizeConfig(&next);
     *config = next;

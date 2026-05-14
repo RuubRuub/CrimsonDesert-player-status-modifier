@@ -4,8 +4,10 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 struct StatConfig {
+    bool enabled = false;
     double consumption_multiplier = 1.0;
     double heal_multiplier = 1.0;
 
@@ -14,9 +16,37 @@ struct StatConfig {
 
 struct DamageChannelConfig {
     bool enabled = false;
+    bool stat_write_fallback = false;
     double multiplier = 1.0;
 
     bool operator==(const DamageChannelConfig&) const = default;
+};
+
+struct DamageConfig {
+    DamageChannelConfig outgoing{false, false, 1.0};
+    DamageChannelConfig incoming{false, false, 1.0};
+
+    bool operator==(const DamageConfig&) const = default;
+};
+
+struct ItemConfig {
+    double gain_multiplier = 1.0;
+
+    bool operator==(const ItemConfig&) const = default;
+};
+
+struct AffinityConfig {
+    double multiplier = 1.0;
+    bool gift_diagnostics = false;
+    bool pet_diagnostics = false;
+
+    bool operator==(const AffinityConfig&) const = default;
+};
+
+struct DurabilityConfig {
+    double consumption_chance = 100.0;
+
+    bool operator==(const DurabilityConfig&) const = default;
 };
 
 struct DamageToggleConfig {
@@ -24,33 +54,6 @@ struct DamageToggleConfig {
     int key = VK_F8;
 
     bool operator==(const DamageToggleConfig&) const = default;
-};
-
-struct DamageConfig {
-    DamageChannelConfig outgoing{true, 2.0};
-    DamageChannelConfig incoming{false, 1.0};
-
-    bool operator==(const DamageConfig&) const = default;
-};
-
-struct ItemConfig {
-    bool enabled = true;
-    double gain_multiplier = 2.0;
-
-    bool operator==(const ItemConfig&) const = default;
-};
-
-struct AffinityConfig {
-    double multiplier = 1.0;
-
-    bool operator==(const AffinityConfig&) const = default;
-};
-
-struct DurabilityConfig {
-    bool enabled = true;
-    double consumption_chance = 100.0;
-
-    bool operator==(const DurabilityConfig&) const = default;
 };
 
 struct PositionControlConfig {
@@ -75,16 +78,24 @@ struct MountConfig {
 
 struct DragonLimitConfig {
     bool roof_summon_experimental = false;
-    bool village_summon = true;
-    bool cancel_restrict_flying = true;
+    bool village_summon = false;
+    bool cancel_restrict_flying = false;
 
     bool operator==(const DragonLimitConfig&) const = default;
+};
+
+struct ResistanceConfig {
+    bool enabled = false;
+    double fire_resistance = 0.0;
+    double ice_resistance = 0.0;
+    double electricity_resistance = 0.0;
+
+    bool operator==(const ResistanceConfig&) const = default;
 };
 
 struct GeneralConfig {
     bool enabled = true;
     bool log_enabled = true;
-    bool enable_stat_changes = true;
     bool verbose = false;
     DWORD max_log_lines = 2000;
     DWORD init_delay_ms = 3000;
@@ -103,16 +114,18 @@ struct ModConfig {
     MountConfig mount;
     DragonLimitConfig dragon_limit;
     PositionControlConfig position_control;
+    ResistanceConfig resistance;
     DamageToggleConfig damage_toggle;
-    StatConfig health{0.5, 2.0};
-    StatConfig stamina{0.5, 1.0};
-    StatConfig spirit{0.5, 2.0};
+    StatConfig health{false, 1.0, 1.0};
+    StatConfig stamina{false, 1.0, 1.0};
+    StatConfig spirit{false, 1.0, 1.0};
 
     bool operator==(const ModConfig&) const = default;
 };
 
 inline bool IsStatConfigNeutral(const StatConfig& config) {
-    return config.consumption_multiplier == 1.0 && config.heal_multiplier == 1.0;
+    return !config.enabled ||
+           (config.consumption_multiplier == 1.0 && config.heal_multiplier == 1.0);
 }
 
 inline bool IsAnyPlayerStatMultiplierEnabled(const ModConfig& config) {
@@ -123,6 +136,13 @@ inline bool IsAnyPlayerStatMultiplierEnabled(const ModConfig& config) {
 
 inline bool IsMountLockEnabled(const ModConfig& config) {
     return config.mount.enabled && (config.mount.lock_health || config.mount.lock_stamina);
+}
+
+inline bool IsResistanceEnabled(const ModConfig& config) {
+    return config.resistance.enabled &&
+           (config.resistance.fire_resistance > 0.0 ||
+            config.resistance.ice_resistance > 0.0 ||
+            config.resistance.electricity_resistance > 0.0);
 }
 
 inline bool ShouldInstallStaminaHook(const ModConfig& config) {
@@ -145,7 +165,17 @@ inline bool ShouldInstallSpiritHook(const ModConfig& config) {
 }
 
 inline bool ShouldInstallLegacyStatWriteHook(const ModConfig& config) {
-    return config.general.enabled && !IsStatConfigNeutral(config.stamina);
+    return config.general.enabled &&
+           (!IsStatConfigNeutral(config.stamina) ||
+            !IsStatConfigNeutral(config.spirit) ||
+            !IsStatConfigNeutral(config.health) ||
+            (config.mount.enabled && config.mount.lock_health) ||
+            (config.damage.incoming.enabled &&
+             config.damage.incoming.stat_write_fallback &&
+             config.damage.incoming.multiplier != 1.0) ||
+            (config.damage.outgoing.enabled &&
+             config.damage.outgoing.stat_write_fallback &&
+             config.damage.outgoing.multiplier != 1.0));
 }
 
 inline bool ShouldInstallSharedStatHooks(const ModConfig& config) {
@@ -160,7 +190,7 @@ inline bool ShouldInstallDamageHook(const ModConfig& config) {
            ((config.damage.outgoing.enabled && config.damage.outgoing.multiplier != 1.0) ||
             (config.damage.incoming.enabled && config.damage.incoming.multiplier != 1.0) ||
             (config.mount.enabled && config.mount.lock_health) ||
-            config.health.heal_multiplier != 1.0);
+            !IsStatConfigNeutral(config.health));
 }
 
 inline bool ShouldInstallItemGainHook(const ModConfig& config) {
@@ -168,7 +198,10 @@ inline bool ShouldInstallItemGainHook(const ModConfig& config) {
 }
 
 inline bool ShouldInstallAffinityHook(const ModConfig& config) {
-    return config.general.enabled && config.affinity.multiplier != 1.0;
+    return config.general.enabled &&
+           (config.affinity.multiplier != 1.0 ||
+            config.affinity.gift_diagnostics ||
+            config.affinity.pet_diagnostics);
 }
 
 inline bool ShouldInstallDurabilityHooks(const ModConfig& config) {
@@ -193,6 +226,7 @@ inline bool ShouldInstallPositionHeightHook(const ModConfig& config) {
 
 bool LoadConfig(const std::wstring& config_path);
 bool ReadConfigSnapshot(const std::wstring& config_path, ModConfig* config);
+std::vector<std::wstring> GetConfigMergePaths(const std::wstring& config_path);
 void SetConfigSnapshot(const std::wstring& config_path, const ModConfig& config);
 ModConfig GetConfig();
 std::wstring GetLoadedConfigPath();

@@ -2,8 +2,14 @@
 
 #include <cstdint>
 
+enum class PlayerPointerMarkerRegister {
+    Rsi,
+    Rdx,
+};
+
 struct PlayerPointerCaptureTarget {
     uintptr_t address = 0;
+    PlayerPointerMarkerRegister marker_register = PlayerPointerMarkerRegister::Rsi;
 };
 
 struct MountPointerCaptureTarget {
@@ -17,6 +23,10 @@ uintptr_t ScanForDragonVillageSummonJump();
 uintptr_t ScanForAbyssDurabilityDeltaAccess();
 uintptr_t ScanForAffinityGainPrepare();
 uintptr_t ScanForAffinityCurrentWrite();
+uintptr_t ScanForAffinityVaryFriendly();
+uintptr_t ScanForAffinityVaryFriendlyWithLogout();
+uintptr_t ScanForAffinityPetDiagnosticReloc();
+uintptr_t ScanForAffinityPetDiagnosticRsrc();
 uintptr_t ScanForDurabilityDeltaAccess();
 uintptr_t ScanForDurabilityWriteAccess();
 uintptr_t ScanForItemGainAccess();

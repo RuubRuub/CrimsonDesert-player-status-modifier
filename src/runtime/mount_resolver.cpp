@@ -1,5 +1,6 @@
 #include "runtime/mount_resolver.h"
 
+#include "config.h"
 #include "logger.h"
 #include "mod_logic.h"
 #include "ptrchain.h"
@@ -16,6 +17,12 @@ namespace {
 
 constexpr int64_t kDragonHealthMaxThreshold = 2500000;
 constexpr int64_t kDragonStaminaMaxThreshold = 300000;
+constexpr int64_t kDragonHealthMaxUpper = 100000000;
+constexpr int64_t kDragonStaminaMaxUpper = 10000000;
+constexpr int64_t kGroundMountHealthMaxThreshold = 10000;
+constexpr int64_t kGroundMountStaminaMaxThreshold = 500;
+constexpr int64_t kGroundMountHealthMaxUpper = 750000;
+constexpr int64_t kGroundMountStaminaMaxUpper = 500000;
 std::atomic<std::uint32_t> g_mount_profile_logs{0};
 
 bool TryReadStatMaxValue(const uintptr_t entry, int64_t* const max_value) {
@@ -31,8 +38,26 @@ bool TryReadStatMaxValue(const uintptr_t entry, int64_t* const max_value) {
     }
 }
 
-bool IsDragonMountProfile(const ActorResolveSnapshot& snapshot) {
+bool IsInClosedRange(const int64_t value, const int64_t minimum, const int64_t maximum) {
+    return value >= minimum && value <= maximum;
+}
+
+bool IsDragonMountMaxima(const int64_t health_max, const int64_t stamina_max) {
+    return IsInClosedRange(health_max, kDragonHealthMaxThreshold, kDragonHealthMaxUpper) &&
+           IsInClosedRange(stamina_max, kDragonStaminaMaxThreshold, kDragonStaminaMaxUpper);
+}
+
+bool IsGroundMountMaxima(const int64_t health_max, const int64_t stamina_max) {
+    return IsInClosedRange(health_max, kGroundMountHealthMaxThreshold, kGroundMountHealthMaxUpper) &&
+           IsInClosedRange(stamina_max, kGroundMountStaminaMaxThreshold, kGroundMountStaminaMaxUpper);
+}
+
+bool IsSupportedMountProfile(const ActorResolveSnapshot& snapshot) {
     if (!snapshot.valid()) {
+        return false;
+    }
+
+    if (!HasExpectedHealthStaminaLayout(snapshot.health_entry, snapshot.stamina_entry)) {
         return false;
     }
 
@@ -43,8 +68,31 @@ bool IsDragonMountProfile(const ActorResolveSnapshot& snapshot) {
         return false;
     }
 
-    return health_max >= kDragonHealthMaxThreshold &&
-           stamina_max >= kDragonStaminaMaxThreshold;
+    return IsDragonMountMaxima(health_max, stamina_max) ||
+           IsGroundMountMaxima(health_max, stamina_max);
+}
+
+const char* MountProfileName(const ActorResolveSnapshot& snapshot) {
+    int64_t health_max = 0;
+    int64_t stamina_max = 0;
+    if (!TryReadStatMaxValue(snapshot.health_entry, &health_max) ||
+        !TryReadStatMaxValue(snapshot.stamina_entry, &stamina_max)) {
+        return "unknown";
+    }
+
+    if (!HasExpectedHealthStaminaLayout(snapshot.health_entry, snapshot.stamina_entry)) {
+        return "rejected-layout";
+    }
+
+    if (IsDragonMountMaxima(health_max, stamina_max)) {
+        return "dragon";
+    }
+
+    if (IsGroundMountMaxima(health_max, stamina_max)) {
+        return "ground";
+    }
+
+    return "rejected";
 }
 
 void LogRejectedMountProfile(const char* const reason, const ActorResolveSnapshot& snapshot) {
@@ -110,7 +158,7 @@ bool TryResolveCurrentMountFromPlayer(const ActorResolveSnapshot& player_snapsho
         return false;
     }
 
-    if (!IsDragonMountProfile(*mount_snapshot)) {
+    if (!IsSupportedMountProfile(*mount_snapshot)) {
         LogRejectedMountProfile("ptrchain-candidate", *mount_snapshot);
         return false;
     }
@@ -121,6 +169,7 @@ bool TryResolveCurrentMountFromPlayer(const ActorResolveSnapshot& player_snapsho
 void MountResolverLoop() {
     while (g_mount_resolver_running.load(std::memory_order_acquire)) {
         RefreshTrackedMountFromPlayerActor();
+        RelockTrackedMountStats();
         Sleep(kMountResolvePollMs);
     }
 }
@@ -143,18 +192,18 @@ bool TryResolveMountContext(const uintptr_t context_root_a,
     if (current_mount.valid() &&
         current_mount.marker != player_snapshot.marker &&
         current_mount.root != player_snapshot.root &&
-        IsDragonMountProfile(current_mount)) {
+        IsSupportedMountProfile(current_mount)) {
         *mount_snapshot = current_mount;
         return true;
     }
 
     if (TryResolveActorResolveFromContextRoot(context_root_a, mount_snapshot, player_snapshot) &&
-        IsDragonMountProfile(*mount_snapshot)) {
+        IsSupportedMountProfile(*mount_snapshot)) {
         return true;
     }
 
     if (TryResolveActorResolveFromContextRoot(context_root_b, mount_snapshot, player_snapshot) &&
-        IsDragonMountProfile(*mount_snapshot)) {
+        IsSupportedMountProfile(*mount_snapshot)) {
         return true;
     }
 
@@ -169,7 +218,20 @@ void RefreshTrackedMountFromPlayerActor() {
 
     ActorResolveSnapshot mount_snapshot{};
     if (!TryResolveCurrentMountFromPlayer(player_snapshot, &mount_snapshot)) {
-        if (!g_mount_resolve.valid()) {
+        const ActorResolveSnapshot current_mount = g_mount_resolve;
+        if (!current_mount.valid()) {
+            return;
+        }
+
+        const ULONGLONG last_seen = g_mount_last_seen_tick.load(std::memory_order_acquire);
+        const DWORD stale_ms = GetConfig().general.stale_component_ms;
+        if (last_seen != 0 && GetTickCount64() - last_seen < stale_ms) {
+            return;
+        }
+
+        RelockTrackedMountStats();
+        const ULONGLONG refreshed_seen = g_mount_last_seen_tick.load(std::memory_order_acquire);
+        if (refreshed_seen != 0 && GetTickCount64() - refreshed_seen < stale_ms) {
             return;
         }
 

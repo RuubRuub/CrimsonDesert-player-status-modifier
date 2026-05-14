@@ -48,6 +48,25 @@ bool TryGetLastWriteTimestamp(const std::wstring& path, ULONGLONG* const timesta
     return true;
 }
 
+bool TryGetConfigSetTimestamp(const std::wstring& primary_path, ULONGLONG* const timestamp) {
+    if (timestamp == nullptr) {
+        return false;
+    }
+
+    ULONGLONG newest_timestamp = 0;
+    const auto paths = GetConfigMergePaths(primary_path);
+    for (const auto& path : paths) {
+        ULONGLONG candidate_timestamp = 0;
+        if (TryGetLastWriteTimestamp(path, &candidate_timestamp) &&
+            candidate_timestamp > newest_timestamp) {
+            newest_timestamp = candidate_timestamp;
+        }
+    }
+
+    *timestamp = newest_timestamp ^ (static_cast<ULONGLONG>(paths.size()) << 1);
+    return true;
+}
+
 void ApplyLoggerReload(const GeneralConfig& previous, const GeneralConfig& current) {
     if (previous.log_enabled && !current.log_enabled) {
         Log("config-watcher: config reloaded, disabling logger");
@@ -66,7 +85,7 @@ void ApplyLoggerReload(const GeneralConfig& previous, const GeneralConfig& curre
 void ConfigWatcherLoop() {
     const std::wstring config_path = GetLoadedConfigPath();
     ULONGLONG last_write_timestamp = 0;
-    TryGetLastWriteTimestamp(config_path, &last_write_timestamp);
+    TryGetConfigSetTimestamp(config_path, &last_write_timestamp);
 
     while (g_config_watcher_running.load(std::memory_order_acquire)) {
         Sleep(kConfigWatchPollMs);
@@ -75,14 +94,15 @@ void ConfigWatcherLoop() {
         }
 
         ULONGLONG observed_timestamp = 0;
-        if (!TryGetLastWriteTimestamp(config_path, &observed_timestamp) || observed_timestamp == last_write_timestamp) {
+        if (!TryGetConfigSetTimestamp(config_path, &observed_timestamp) ||
+            observed_timestamp == last_write_timestamp) {
             continue;
         }
 
         Sleep(kConfigReloadSettleMs);
 
         ULONGLONG settled_timestamp = 0;
-        if (!TryGetLastWriteTimestamp(config_path, &settled_timestamp)) {
+        if (!TryGetConfigSetTimestamp(config_path, &settled_timestamp)) {
             continue;
         }
 
@@ -118,23 +138,18 @@ void ConfigWatcherLoop() {
             continue;
         }
 
-        if (!ApplyDamageToggleConfig(previous.damage_toggle, next.damage_toggle)) {
-            if (previous.general.log_enabled) {
-                Log("config-watcher: failed to apply outgoing damage toggle changes");
+        ApplyDamageToggleConfig(previous.damage_toggle, next.damage_toggle);
+
+            SetConfigSnapshot(config_path, next);
+                ApplyLoggerReload(previous.general, next.general);
+
+            if (DidHookRequirementsChange(previous, next) && next.general.log_enabled) {
+                Log("config-watcher: hook loadout changed; restart game to apply hook enable/disable changes");
             }
-            continue;
-        }
 
-        SetConfigSnapshot(config_path, next);
-        ApplyLoggerReload(previous.general, next.general);
-
-        if (DidHookRequirementsChange(previous, next) && next.general.log_enabled) {
-            Log("config-watcher: hook loadout changed; restart game to apply hook enable/disable changes");
-        }
-
-        if (disabled_position_control && next.general.log_enabled) {
-            Log("config-watcher: position control requested but position hook is unavailable");
-        }
+            if (disabled_position_control && next.general.log_enabled) {
+                Log("config-watcher: position control requested but position hook is unavailable");
+            }
     }
 }
 

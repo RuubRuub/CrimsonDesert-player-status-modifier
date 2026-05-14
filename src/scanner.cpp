@@ -4,8 +4,10 @@
 
 #include <Windows.h>
 
+#include <array>
 #include <cstdint>
 #include <cstring>
+#include <iterator>
 #include <string>
 #include <vector>
 
@@ -44,6 +46,50 @@ struct ScanOutcome {
     uintptr_t address = 0;
     ScanStatus status = ScanStatus::NotFound;
 };
+
+constexpr uintptr_t kMinimumPointerAddress = 0x10000;
+
+template <std::size_t N>
+bool ExpectBytes(const uintptr_t address, const std::array<std::uint8_t, N>& bytes) {
+    if (address < kMinimumPointerAddress) {
+        return false;
+    }
+
+    __try {
+        return std::memcmp(reinterpret_cast<const void*>(address), bytes.data(), bytes.size()) == 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+template <std::size_t N>
+uintptr_t ResolveExpectedRvaCandidates(const char* const name,
+                                       const uintptr_t* const rvas,
+                                       const std::size_t rva_count,
+                                       const std::array<std::uint8_t, N>& expected) {
+    if (rvas == nullptr || rva_count == 0) {
+        return 0;
+    }
+
+    const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleA(nullptr));
+    if (base == 0) {
+        Log("scanner: %s unavailable; base module missing", name);
+        return 0;
+    }
+
+    for (std::size_t i = 0; i < rva_count; ++i) {
+        const uintptr_t target = base + rvas[i];
+        if (ExpectBytes(target, expected)) {
+            Log("scanner: %s found at known RVA 0x%08llX",
+                name,
+                static_cast<unsigned long long>(rvas[i]));
+            return target;
+        }
+    }
+
+    Log("scanner: %s known RVA candidates mismatched expected bytes", name);
+    return 0;
+}
 
 SectionSpan EnumerateMainModuleImageSpan() {
     const auto module = reinterpret_cast<const std::uint8_t*>(GetModuleHandleW(nullptr));
@@ -115,11 +161,16 @@ std::vector<SectionSpan> EnumerateMainModuleSections(const bool text_only) {
             continue;
         }
 
+        const bool executable = (section.Characteristics & IMAGE_SCN_MEM_EXECUTE) != 0;
+        if (!text_only && !executable) {
+            continue;
+        }
+
         sections.push_back({
             module + section.VirtualAddress,
             static_cast<std::size_t>(section.Misc.VirtualSize),
             section_name,
-            (section.Characteristics & IMAGE_SCN_MEM_EXECUTE) != 0,
+            executable,
         });
     }
 
@@ -198,6 +249,8 @@ std::vector<MatchResult> ScanPattern(const std::vector<SectionSpan>& spans,
 
 ScanOutcome ScanInSections(const PatternDefinition* definitions,
                           const std::size_t definition_count) {
+    bool saw_ambiguous = false;
+
     for (int pass = 0; pass < 2; ++pass) {
         const bool text_only = pass == 0;
         const auto sections = EnumerateMainModuleSections(text_only);
@@ -218,17 +271,18 @@ ScanOutcome ScanInSections(const PatternDefinition* definitions,
             }
 
             if (matches.size() > 1) {
-                return {
-                    0,
-                    ScanStatus::Ambiguous,
-                };
+                saw_ambiguous = true;
+                Log("scanner: pattern %s ambiguous in %s (%llu matches), trying next variant",
+                    definition.name != nullptr ? definition.name : "<unnamed>",
+                    text_only ? ".text" : "executable-sections",
+                    static_cast<unsigned long long>(matches.size()));
             }
         }
     }
 
     const auto image_span = EnumerateMainModuleImageSpan();
     if (image_span.begin == nullptr || image_span.size == 0) {
-        return {};
+        return saw_ambiguous ? ScanOutcome{0, ScanStatus::Ambiguous} : ScanOutcome{};
     }
 
     const std::vector<SectionSpan> image_spans{image_span};
@@ -245,51 +299,84 @@ ScanOutcome ScanInSections(const PatternDefinition* definitions,
         }
 
         if (matches.size() > 1) {
-            return {
-                0,
-                ScanStatus::Ambiguous,
-            };
+            saw_ambiguous = true;
+            Log("scanner: pattern %s ambiguous in image (%llu matches), trying next variant",
+                definition.name != nullptr ? definition.name : "<unnamed>",
+                static_cast<unsigned long long>(matches.size()));
         }
     }
 
-    return {};
+    return saw_ambiguous ? ScanOutcome{0, ScanStatus::Ambiguous} : ScanOutcome{};
 }
 
 }  // namespace
 
 PlayerPointerCaptureTarget ScanForPlayerPointerCapture() {
-    static constexpr PatternDefinition kPatterns[] = {
+    static constexpr PatternDefinition kRdxPatterns[] = {
         {
-            "primary",
-            "49 8B 7D 18 49 8B 44 24 40 48 8B 40 68 48 8B 70 20",
-            17,
+            "rax-rdx-1.05.01-exe",
+            "48 8B 40 68 48 8B 50 20 4C 8D 45 D7 0F B7 52 30 E8 59 2D AE 01 C5 FA 10 45 D7 C5 F8 2F C6 76 6C",
+            8,
         },
         {
-            "fallback",
-            "49 8B 44 24 40 48 8B 40 68 48 8B 70 20",
-            13,
+            "rax-rdx-1.05.01-relaxed",
+            "48 8B 40 68 48 8B 50 20 4C 8D 45 D7 0F B7 52 30 E8 ?? ?? ?? ?? C5 FA 10 45 D7",
+            8,
         },
     };
 
-    const auto outcome = ScanInSections(kPatterns, sizeof(kPatterns) / sizeof(kPatterns[0]));
-    if (outcome.status == ScanStatus::Ambiguous) {
+    const auto rdx_outcome = ScanInSections(kRdxPatterns, sizeof(kRdxPatterns) / sizeof(kRdxPatterns[0]));
+    if (rdx_outcome.status == ScanStatus::Unique) {
+        return {rdx_outcome.address, PlayerPointerMarkerRegister::Rdx};
+    }
+
+    static constexpr PatternDefinition kRsiPatterns[] = {
+        {
+            "rcx-based",
+            "48 8B 41 68 48 8B 70 20 48 81 C6 B0 03 00 00 85 D2 75 0D 48",
+            8,
+        },
+        {
+            "rax-fallback-2",
+            "48 8B 40 68 48 8B 70 20 48 85 F6 75 02 EB 73 0F B7 5D 77 48 8B 46 08 48 8D",
+            8,
+        },
+        {
+            "rax-fallback-3",
+            "48 8B 40 68 48 8B 70 20 4C 8B 66 78 4D 3B 34 24 74 15 49 8B CE E8",
+            8,
+        },
+        {
+            "rax-primary",
+            "48 8B 40 68 48 8B 70 20 0F B7 7D 77 44 8B 75 BB 4C 8B 7E 08 48 8B 86 88 00",
+            8,
+        },
+    };
+
+    const auto rsi_outcome = ScanInSections(kRsiPatterns, sizeof(kRsiPatterns) / sizeof(kRsiPatterns[0]));
+    if (rsi_outcome.status == ScanStatus::Unique) {
+        return {rsi_outcome.address, PlayerPointerMarkerRegister::Rsi};
+    }
+
+    if (rdx_outcome.status == ScanStatus::Ambiguous || rsi_outcome.status == ScanStatus::Ambiguous) {
         Log("scanner: player-pointer found multiple matches, install failed");
         return {};
     }
 
-    if (outcome.status != ScanStatus::Unique) {
-        Log("scanner: player-pointer found 0 matches");
-        return {};
-    }
-
-    return {outcome.address};
+    Log("scanner: player-pointer found 0 matches");
+    return {};
 }
 
 MountPointerCaptureTarget ScanForMountPointerCapture() {
     static constexpr PatternDefinition kPatterns[] = {
         {
-            "primary",
-            "48 8B C7 49 8B 7D 08 80 BF 94 00 00 00 00 0F 85 ?? ?? ?? ?? 48 8B 47 68 48 8B 48 20 48 83 C1 30 E8 ?? ?? ?? ?? 66 83 B8 E4 00 00 00 00",
+            "primary-1.05.01-exe",
+            "80 BF 94 00 00 00 00 0F 85 F1 02 00 00 4C 8B 4F 68 48 8B CF E8 A5 84 E7 FF C5 F8 28 DE 84",
+            20,
+        },
+        {
+            "primary-1.05.01-relaxed",
+            "80 BF 94 00 00 00 00 0F 85 ?? ?? ?? ?? 4C 8B 4F 68 48 8B CF E8 ?? ?? ?? ?? C5 F8 28 DE 84",
             20,
         },
     };
@@ -311,29 +398,30 @@ MountPointerCaptureTarget ScanForMountPointerCapture() {
 uintptr_t ScanForPositionHeightAccess() {
     static constexpr PatternDefinition kPatterns[] = {
         {
-            "primary",
-            "49 3B F7 0F 8C ?? ?? ?? ?? 0F 28 C6 F3 45 0F 5C C8 41 0F 58 45 00 41 0F 11 45 00 48 8B BB F8 00 00 00 48 63 83 00 01 00 00",
-            22,
+            "position-height-v1001235",
+            "41 0F 11 45 00 48 8B BB F8 00 00 00 48 63 83 00 01 00 00 48 8D 34 C7",
+            0,
         },
         {
-            "fallback",
-            "0F 28 C6 F3 45 0F 5C C8 41 0F 58 45 00 41 0F 11 45 00",
-            13,
+            "position-height-relaxed",
+            "41 0F 11 45 00 48 8B BB F8 00 00 00",
+            0,
         },
     };
 
     const auto outcome = ScanInSections(kPatterns, sizeof(kPatterns) / sizeof(kPatterns[0]));
-    if (outcome.status == ScanStatus::Ambiguous) {
-        Log("scanner: position-height found multiple matches, install failed");
-        return 0;
+    if (outcome.status == ScanStatus::Unique) {
+        return outcome.address;
     }
 
-    if (outcome.status != ScanStatus::Unique) {
-        Log("scanner: position-height found 0 matches");
-        return 0;
-    }
-
-    return outcome.address;
+    static constexpr std::array<std::uint8_t, 5> kExpectedBytes = {
+        0x41, 0x0F, 0x11, 0x45, 0x00
+    };
+    static constexpr uintptr_t kKnownRvas[] = {
+        0x0384782C,  // CrimsonDesert.exe 1.0.0.1235
+        0x0381859C,  // CrimsonDesert.exe 1.05.01
+    };
+    return ResolveExpectedRvaCandidates("position-height", kKnownRvas, std::size(kKnownRvas), kExpectedBytes);
 }
 
 uintptr_t ScanForDamageBattleAccess() {
@@ -367,70 +455,73 @@ uintptr_t ScanForDamageBattleAccess() {
 uintptr_t ScanForDragonVillageSummonJump() {
     static constexpr PatternDefinition kPatterns[] = {
         {
-            "primary",
-            "84 C0 74 09 41 89 1C 24 E9 ?? ?? ?? ?? 8B 47 0C",
-            2,
+            "village-v1001235-context",
+            "C7 44 24 50 06 00 00 00 89 5C 24 48 4C 8D 0D ?? ?? ?? ?? 4C 89 4C 24 40 44 89 6C 24 38 4C 89 4C 24 30 4C 89 4C 24 28 4C 89 4C 24 20 B1 01 E8 ?? ?? ?? ?? 41 89 1C 24 E9 ?? ?? ?? ?? 41 C6 87 C0 00 00 00 01",
+            51,
         },
     };
 
     const auto outcome = ScanInSections(kPatterns, sizeof(kPatterns) / sizeof(kPatterns[0]));
-    if (outcome.status == ScanStatus::Ambiguous) {
-        Log("scanner: dragon-village-summon found multiple matches, install failed");
-        return 0;
+    if (outcome.status == ScanStatus::Unique) {
+        return outcome.address;
     }
 
-    if (outcome.status != ScanStatus::Unique) {
-        Log("scanner: dragon-village-summon found 0 matches");
-        return 0;
-    }
-
-    return outcome.address;
+    static constexpr std::array<std::uint8_t, 4> kExpectedBytes = {
+        0x41, 0x89, 0x1C, 0x24
+    };
+    static constexpr uintptr_t kKnownRvas[] = {
+        0x01CC04A9,  // CrimsonDesert.exe 1.0.0.1235
+        0x01C9CDB9,  // CrimsonDesert.exe 1.05.01
+    };
+    return ResolveExpectedRvaCandidates("dragon-village-summon", kKnownRvas, std::size(kKnownRvas), kExpectedBytes);
 }
 
 uintptr_t ScanForDragonFlyingRestrictWrite() {
     static constexpr PatternDefinition kPatterns[] = {
         {
-            "primary",
-            "41 88 47 04 41 89 3F 48 8B 5C 24 ??",
+            "flying-result-write",
+            "41 88 47 04 41 89 3F 48 8B 5C 24 ?? 48 8B 6C 24 ?? 48 8B B4 24 ?? ?? ?? ?? 48 83 C4 40 41 5F",
             0,
         },
     };
 
     const auto outcome = ScanInSections(kPatterns, sizeof(kPatterns) / sizeof(kPatterns[0]));
-    if (outcome.status == ScanStatus::Ambiguous) {
-        Log("scanner: dragon-flying-restrict found multiple matches, install failed");
-        return 0;
+    if (outcome.status == ScanStatus::Unique) {
+        return outcome.address;
     }
 
-    if (outcome.status != ScanStatus::Unique) {
-        Log("scanner: dragon-flying-restrict found 0 matches");
-        return 0;
-    }
-
-    return outcome.address;
+    static constexpr std::array<std::uint8_t, 7> kExpectedBytes = {
+        0x41, 0x88, 0x47, 0x04, 0x41, 0x89, 0x3F
+    };
+    static constexpr uintptr_t kKnownRvas[] = {
+        0x01E4746B,  // CrimsonDesert.exe 1.0.0.1235
+        0x01E21E4B,  // CrimsonDesert.exe 1.05.01
+    };
+    return ResolveExpectedRvaCandidates("dragon-flying-restrict", kKnownRvas, std::size(kKnownRvas), kExpectedBytes);
 }
 
 uintptr_t ScanForDragonRoofRestrictTest() {
     static constexpr PatternDefinition kPatterns[] = {
         {
-            "primary",
-            "85 DB 74 59 48 8B 05 ?? ?? ?? ?? 48 8B 48 20 8B D3 48 8B 89 A0 07 00 00",
-            0,
+            "roof-test-context",
+            "48 8D 3D ?? ?? ?? ?? 85 DB 74 59 48 8B 05 ?? ?? ?? ?? 44 8B C3 48 8D 54 24 50",
+            7,
         },
     };
 
     const auto outcome = ScanInSections(kPatterns, sizeof(kPatterns) / sizeof(kPatterns[0]));
-    if (outcome.status == ScanStatus::Ambiguous) {
-        Log("scanner: dragon-roof-restrict found multiple matches, install failed");
-        return 0;
+    if (outcome.status == ScanStatus::Unique) {
+        return outcome.address;
     }
 
-    if (outcome.status != ScanStatus::Unique) {
-        Log("scanner: dragon-roof-restrict found 0 matches");
-        return 0;
-    }
-
-    return outcome.address;
+    static constexpr std::array<std::uint8_t, 4> kExpectedBytes = {
+        0x85, 0xDB, 0x74, 0x59
+    };
+    static constexpr uintptr_t kKnownRvas[] = {
+        0x002E42CB,  // CrimsonDesert.exe 1.0.0.1235
+        0x002E2F0B,  // CrimsonDesert.exe 1.05.01
+    };
+    return ResolveExpectedRvaCandidates("dragon-roof-restrict", kKnownRvas, std::size(kKnownRvas), kExpectedBytes);
 }
 
 uintptr_t ScanForItemGainAccess() {
@@ -457,14 +548,14 @@ uintptr_t ScanForItemGainAccess() {
 uintptr_t ScanForAffinityGainPrepare() {
     static constexpr PatternDefinition kPatterns[] = {
         {
-            "primary",
-            "0F B6 47 38 88 45 ? 0F B6 47 39 88 45 ? 8B 47 08 89 45 ? 48 8B 47 10 48 89 45 ? 0F 10 47 18",
-            20,
+            "primary-1.05.01-exe",
+            "89 45 F0 48 8B 07 48 89 45 C8 8B 47 08 89 45 D0 48 8B 4F 10 48 89 4D D8 48 85 C9 74 2C 80",
+            30,
         },
         {
-            "fallback",
-            "8B 47 08 89 45 ? 48 8B 47 10 48 89 45 ? 0F 10 47 18 0F 11 45 ?",
-            6,
+            "primary-1.05.01-relaxed",
+            "89 45 F0 48 8B 07 48 89 45 C8 8B 47 08 89 45 D0 48 8B 4F 10 48 89 4D D8 48 85 C9 74 ?? 80",
+            30,
         },
     };
 
@@ -486,13 +577,8 @@ uintptr_t ScanForAffinityCurrentWrite() {
     static constexpr PatternDefinition kPatterns[] = {
         {
             "primary",
-            "48 89 43 48 41 8B CD 83 E9 01 74 0A 83 F9 01 75 09 88 4B 3F",
-            0,
-        },
-        {
-            "fallback",
-            "C7 43 40 00 00 00 00 48 89 43 48 41 8B CD 83 E9 01 74 0A",
-            7,
+            "08 48 8D 42 08 48 89 43 48 41 8B FC 48 8B 03 48 8B CB FF 50 10 85 FF 0F 85",
+            5,
         },
     };
 
@@ -510,16 +596,71 @@ uintptr_t ScanForAffinityCurrentWrite() {
     return outcome.address;
 }
 
+uintptr_t ScanForAffinityVaryFriendly() {
+    static constexpr std::array<std::uint8_t, 7> kExpectedBytes = {
+        0x41, 0xFF, 0xD2, 0x90, 0x48, 0x8D, 0x1D,
+    };
+    static constexpr uintptr_t kKnownRvas[] = {
+        0x0FAB2A84,  // CrimsonDesert.exe 1.0.0.1245
+        0x0F48EFF4,  // CrimsonDesert.exe 1.0.0.1235
+        0x0F995548,  // CrimsonDesert.exe 1.05.01
+    };
+    return ResolveExpectedRvaCandidates("affinity-vary-friendly callsite", kKnownRvas, std::size(kKnownRvas), kExpectedBytes);
+}
+
+uintptr_t ScanForAffinityVaryFriendlyWithLogout() {
+    static constexpr std::array<std::uint8_t, 7> kExpectedBytes = {
+        0x41, 0xFF, 0xD2, 0x90, 0x48, 0x8D, 0x1D,
+    };
+    static constexpr uintptr_t kKnownRvas[] = {
+        0x0132DDFB,  // CrimsonDesert.exe 1.0.0.1235
+        0x01319B8B,  // CrimsonDesert.exe 1.05.01
+    };
+    return ResolveExpectedRvaCandidates("affinity-vary-friendly-with-logout callsite",
+                                        kKnownRvas,
+                                        std::size(kKnownRvas),
+                                        kExpectedBytes);
+}
+
+uintptr_t ScanForAffinityPetDiagnosticReloc() {
+    static constexpr std::array<std::uint8_t, 7> kExpectedBytes = {
+        0x41, 0xFF, 0xD2, 0x90, 0x48, 0x8D, 0x1D,
+    };
+    static constexpr uintptr_t kKnownRvas[] = {
+        0x0130FFF5,  // CrimsonDesert.exe 1.0.0.1235
+        0x012FBD75,  // CrimsonDesert.exe 1.05.01
+    };
+    return ResolveExpectedRvaCandidates("affinity-petdiag-reloc callsite",
+                                        kKnownRvas,
+                                        std::size(kKnownRvas),
+                                        kExpectedBytes);
+}
+
+uintptr_t ScanForAffinityPetDiagnosticRsrc() {
+    static constexpr std::array<std::uint8_t, 7> kExpectedBytes = {
+        0x41, 0xFF, 0xD2, 0x90, 0x48, 0x8D, 0x1D,
+    };
+    static constexpr uintptr_t kKnownRvas[] = {
+        0x0C98C977,  // CrimsonDesert.exe 1.0.0.1245
+        0x0C563647,  // CrimsonDesert.exe 1.0.0.1235
+        0x0C7EBCBE,  // CrimsonDesert.exe 1.05.01
+    };
+    return ResolveExpectedRvaCandidates("affinity-petdiag-rsrc callsite",
+                                        kKnownRvas,
+                                        std::size(kKnownRvas),
+                                        kExpectedBytes);
+}
+
 uintptr_t ScanForDurabilityWriteAccess() {
     static constexpr PatternDefinition kPatterns[] = {
         {
-            "primary",
-            "66 3B CF 66 0F 4C F9 66 89 7B 50 48 8B 5C 24 20 48 8B 03 33 D2 48 8B CB FF 50 20",
-            7,
+            "primary-1.05.01-exe",
+            "66 89 7B 50 40 88 7B 52 40 88 7B 54 EB 03 48 89 FB 48 8B 05 BA BE 15 F6 48",
+            0,
         },
         {
-            "fallback",
-            "66 89 7B 50 48 8B 5C 24 20 48 8B 03 33 D2 48 8B CB FF 50 20",
+            "primary-1.05.01-relaxed",
+            "66 89 7B 50 40 88 7B 52 40 88 7B 54 EB ?? 48 89 FB 48 8B 05 ?? ?? ?? ?? 48",
             0,
         },
     };
@@ -542,13 +683,8 @@ uintptr_t ScanForDurabilityDeltaAccess() {
     static constexpr PatternDefinition kPatterns[] = {
         {
             "primary",
-            "0F B7 C7 66 41 03 C5 66 89 45 38 79 0B 33 C0 66 89 45 38 0F B7 C8",
-            3,
-        },
-        {
-            "fallback",
-            "66 41 03 C5 66 89 45 38 79 0B 33 C0 66 89 45 38",
-            0,
+            "C1 79 C5 C1 06 66 41 03 C0 66 89 45 EC C4 C1 79 C5 C1 07 66 41 03 C1 66 89",
+            5,
         },
     };
 
